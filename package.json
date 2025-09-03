@@ -8,7 +8,15 @@
     "compile": "hardhat compile",
     "deploy": "hardhat ignition deploy",
     "node": "hardhat node",
-    "clean": "hardhat clean"
+    "clean": "hardhat clean",
+    "deploy:local": "hardhat run scripts/deploy-token-factory.ts --network localhost",
+    "deploy:mumbai": "hardhat run scripts/deploy-token-factory.ts --network mumbai", 
+    "deploy:polygon": "hardhat run scripts/deploy-token-factory.ts --network polygon",
+    "deploy:sepolia": "hardhat run scripts/deploy-token-factory.ts --network sepolia",
+    "deploy:ethereum": "hardhat run scripts/deploy-token-factory.ts --network mainnet",
+    "verify:polygon": "hardhat verify --network polygon",
+    "verify:mumbai": "hardhat verify --network mumbai",
+    "verify:sepolia": "hardhat verify --network sepolia"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +33,7 @@
     "viem": "^2.37.1"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.4.0"
+    "@openzeppelin/contracts": "^5.4.0",
+    "dotenv": "^17.2.2"
   }
 }

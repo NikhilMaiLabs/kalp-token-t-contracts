@@ -19,10 +19,10 @@ import "./BondingCurveToken.sol";
  * - Handle creation fees and revenue collection
  * 
  * TOKEN DEPLOYMENT:
- * - Users pay a creation fee to deploy new bonding curve tokens
+ * - Users pay a creation fee in POL to deploy new bonding curve tokens
  * - Each token gets unique bonding curve parameters (slope, base price, graduation threshold)
  * - Factory sets fee structures for all tokens (graduation fees & trading fees)
- * - Tokens are automatically configured with DEX integration (Uniswap V2)
+ * - Tokens are automatically configured with DEX integration (Uniswap V3 on Polygon)
  * 
  * FEE MANAGEMENT:
  * - Creation fees: Charged when deploying new tokens
@@ -86,7 +86,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         /// @notice Whether the token has graduated to DEX trading
         bool hasGraduated;
         
-        /// @notice Address of the Uniswap V2 pair (only set after graduation)
+        /// @notice Address of the Uniswap V3 pool (only set after graduation)
         address dexPair;
     }
     
@@ -117,14 +117,14 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════════
     
     /// @notice Fee charged for deploying a new token (in wei)
-    /// @dev Default is 0.01 ETH, can be updated by owner
+    /// @dev Default is 1 POL, can be updated by owner
     /// @dev This fee goes to the factory owner for platform revenue
-    uint256 public creationFee = 0.01 ether;
+    uint256 public creationFee = 1 ether; // 1 POL on Polygon
     
-    /// @notice Address of the Uniswap V2 router contract
+    /// @notice Address of the Uniswap V3 Position Manager contract
     /// @dev Used by all tokens for DEX integration during graduation
-    /// @dev Can be updated by owner in case of router upgrades
-    address public uniswapV2Router;
+    /// @dev Can be updated by owner in case of position manager upgrades
+    address public positionManager;
     
     /// @notice Address that receives all platform fees and trading fees
     /// @dev All tokens created by this factory send fees to this address
@@ -214,7 +214,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @param basePrice Initial token price in wei
      * @param graduationThreshold Market cap threshold for DEX graduation
      * @param creator Address of the user who deployed the token
-     * @param creationFee Amount of ETH paid as creation fee
+     * @param creationFee Amount of POL paid as creation fee
      */
     event TokenCreated(
         address indexed token,
@@ -235,7 +235,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @param token Address of the token that graduated
      * @param finalSupply Total token supply at the time of graduation
      * @param marketCap Market capitalization that triggered graduation
-     * @param dexPair Address of the created Uniswap V2 trading pair
+     * @param dexPair Address of the created Uniswap V3 trading pool
      * @param platformFee Amount of platform fees collected during graduation
      */
     event TokenGraduated(
@@ -258,15 +258,15 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @notice Emitted when the factory owner withdraws collected creation fees
      * @dev Used for transparency and accounting of platform revenue
      * @param owner Address that received the withdrawn fees
-     * @param amount Amount of ETH withdrawn
+     * @param amount Amount of POL withdrawn
      */
     event FeesWithdrawn(address indexed owner, uint256 amount);
     
     /**
-     * @notice Emitted when the Uniswap V2 router address is updated
+     * @notice Emitted when the Uniswap V3 Position Manager address is updated
      * @dev Critical event as it affects all future token graduations
-     * @param oldRouter Previous router address
-     * @param newRouter New router address that will be used for DEX integration
+     * @param oldRouter Previous position manager address
+     * @param newRouter New position manager address that will be used for DEX integration
      */
     event RouterUpdated(address indexed oldRouter, address indexed newRouter);
     
@@ -367,12 +367,12 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @notice Initializes the TokenFactory with required addresses and configuration
      * @dev Sets up the factory with DEX integration and fee collection infrastructure
      * 
-     * @param _uniswapV2Router Address of the Uniswap V2 router for DEX integration
+     * @param _positionManager Address of the Uniswap V3 Position Manager for DEX integration
      * @param _platformFeeCollector Address that will receive all platform fees
      * @param _owner Address that will become the factory owner with admin privileges
      * 
      * Requirements:
-     * - Router address cannot be zero address
+     * - Position manager address cannot be zero address
      * - Platform fee collector cannot be zero address
      * - Owner is set via Ownable constructor
      * 
@@ -380,20 +380,20 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * - Creates empty tokens array for tracking deployments
      * - Sets default fee structures (80% liquidity, 0% creator, 20% platform)
      * - Sets default trading fees to 0% for both buy and sell
-     * - Sets creation fee to 0.01 ETH
+     * - Sets creation fee to 1 POL
      * 
      * Post-Deployment:
      * - Factory owner can update all fee structures
      * - Users can immediately start deploying tokens
-     * - All tokens will use the configured router for graduation
+     * - All tokens will use the configured position manager for graduation
      */
-    constructor(address _uniswapV2Router, address _platformFeeCollector, address _owner) Ownable(_owner) {
+    constructor(address _positionManager, address _platformFeeCollector, address _owner) Ownable(_owner) {
         // Validate critical addresses
-        require(_uniswapV2Router != address(0), "Router cannot be zero address");
+        require(_positionManager != address(0), "Position manager cannot be zero address");
         require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
         
         // Initialize DEX integration
-        uniswapV2Router = _uniswapV2Router;
+        positionManager = _positionManager;
         
         // Initialize fee collection
         platformFeeCollector = _platformFeeCollector;
@@ -438,7 +438,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * Example Usage:
      * ```solidity
      * // Create token with 1000 wei base price, 100 wei slope increase per token
-     * address myToken = factory.createToken{value: 0.01 ether}(
+     * address myToken = factory.createToken{value: 1 ether}(
      *     "My Token", 
      *     "MTK", 
      *     100, 
@@ -474,15 +474,15 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * - Function has reentrancy protection
      * 
      * Graduation Threshold Considerations:
-     * - Lower threshold (1-10 ETH): Quick graduation, less bonding curve trading
-     * - Medium threshold (10-50 ETH): Balanced approach
-     * - Higher threshold (50+ ETH): Extended bonding curve phase
-     * - Very high threshold (100+ ETH): May never graduate if not enough demand
+     * - Lower threshold (1-10 POL): Quick graduation, less bonding curve trading
+     * - Medium threshold (10-50 POL): Balanced approach
+     * - Higher threshold (50+ POL): Extended bonding curve phase
+     * - Very high threshold (100+ POL): May never graduate if not enough demand
      * 
      * Example Usage:
      * ```solidity
-     * // Create token that graduates at 10 ETH market cap
-     * address myToken = factory.createTokenWithCustomThreshold{value: 0.01 ether}(
+     * // Create token that graduates at 10 POL market cap
+     * address myToken = factory.createTokenWithCustomThreshold{value: 1 ether}(
      *     "Custom Token", 
      *     "CTK", 
      *     50, 
@@ -553,7 +553,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
             graduationThreshold,    // Market cap for graduation
             msg.sender,             // Token creator (becomes owner)
             address(this),          // Factory address (gets admin permissions)
-            uniswapV2Router,       // Uniswap router for DEX integration
+            positionManager,        // Uniswap V3 Position Manager for DEX integration
             liquidityFee,          // Liquidity fee percentage
             creatorFee,            // Creator fee percentage
             platformFee,           // Platform fee percentage
@@ -914,31 +914,31 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @notice Updates the Uniswap V2 router used for token graduations
+     * @notice Updates the Uniswap V3 Position Manager used for token graduations
      * @dev Affects all future token graduations but not existing graduated tokens
      * @dev Critical function as it determines DEX integration for new graduations
      * 
-     * @param newRouter Address of the new Uniswap V2 router contract
+     * @param newPositionManager Address of the new Uniswap V3 Position Manager contract
      * 
      * Requirements:
      * - Caller must be factory owner
-     * - New router address cannot be zero address
+     * - New position manager address cannot be zero address
      * 
      * Considerations:
      * - Only affects tokens that graduate after this change
-     * - Existing graduated tokens continue using their original DEX pairs
-     * - Should only be changed for legitimate router upgrades
+     * - Existing graduated tokens continue using their original V3 pools
+     * - Should only be changed for legitimate position manager upgrades
      * - Test thoroughly before changing in production
      * 
      * Emits:
-     * - RouterUpdated event
+     * - RouterUpdated event (kept for backward compatibility)
      */
-    function updateRouter(address newRouter) external onlyOwner {
-        require(newRouter != address(0), "Router cannot be zero address");
-        address oldRouter = uniswapV2Router;
-        uniswapV2Router = newRouter;
+    function updateRouter(address newPositionManager) external onlyOwner {
+        require(newPositionManager != address(0), "Position manager cannot be zero address");
+        address oldPositionManager = positionManager;
+        positionManager = newPositionManager;
         
-        emit RouterUpdated(oldRouter, newRouter);
+        emit RouterUpdated(oldPositionManager, newPositionManager);
     }
     
     /**
@@ -958,7 +958,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * 
      * Revenue Sources:
      * - Token creation fees paid by users
-     * - Any accidental ETH sent to factory contract
+     * - Any accidental POL sent to factory contract
      * - Does NOT include trading fees (sent directly to platform fee collector)
      * 
      * Emits:
@@ -1007,7 +1007,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         // Update token status in factory records
         uint256 index = tokenIndex[token];
         tokens[index].hasGraduated = true;
-        tokens[index].dexPair = tokenContract.dexPair();
+        tokens[index].dexPair = tokenContract.dexPool();
         
         emit TokenGraduated(
             token,
@@ -1019,15 +1019,15 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
-    // ETH HANDLING FUNCTIONS
+    // POL HANDLING FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════════
     
     /**
-     * @notice Receives ETH sent directly to the factory contract
-     * @dev Allows the contract to accept ETH from various sources
-     * @dev ETH received here can be withdrawn by factory owner via withdrawFees()
+     * @notice Receives POL sent directly to the factory contract
+     * @dev Allows the contract to accept POL from various sources
+     * @dev POL received here can be withdrawn by factory owner via withdrawFees()
      * 
-     * Sources of ETH:
+     * Sources of POL:
      * - Token creation fees (primary source)
      * - Accidental direct transfers
      * - Gas stipend refunds from failed transactions
@@ -1040,17 +1040,17 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     /**
      * @notice Fallback function for handling unexpected calls
      * @dev Called when contract is called with data that doesn't match any function
-     * @dev Also accepts ETH to ensure contract doesn't reject unexpected payments
+     * @dev Also accepts POL to ensure contract doesn't reject unexpected payments
      * 
      * Behavior:
-     * - Accepts ETH sent with invalid function calls
+     * - Accepts POL sent with invalid function calls
      * - Does not execute any logic
-     * - Prevents accidental ETH loss from misformed transactions
+     * - Prevents accidental POL loss from misformed transactions
      * 
      * Security Note:
      * - Does not perform any state changes
-     * - Simply accepts ETH if provided
-     * - All received ETH can be withdrawn by factory owner
+     * - Simply accepts POL if provided
+     * - All received POL can be withdrawn by factory owner
      */
     fallback() external payable {}
 }

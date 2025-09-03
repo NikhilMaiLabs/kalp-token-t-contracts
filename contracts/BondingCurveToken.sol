@@ -7,45 +7,73 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./utils/Blacklist.sol";
 
-interface IUniswapV2Factory {
-    function createPair(address tokenA, address tokenB) external returns (address pair);
+interface IUniswapV3Factory {
+    function createPool(address tokenA, address tokenB, uint24 fee) external returns (address pool);
+    function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool);
 }
 
-interface IUniswapV2Router02 {
-    function factory() external pure returns (address);
-    function WETH() external pure returns (address);
-    function addLiquidityETH(
-        address token,
-        uint amountTokenDesired,
-        uint amountTokenMin,
-        uint amountETHMin,
-        address to,
-        uint deadline
-    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+interface INonfungiblePositionManager {
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    function mint(MintParams calldata params) external payable returns (
+        uint256 tokenId,
+        uint128 liquidity,
+        uint256 amount0,
+        uint256 amount1
+    );
+
+    function factory() external view returns (address);
+    function WETH9() external view returns (address);
+}
+
+interface IWPOL {
+    function deposit() external payable;
+    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 /**
  * @title BondingCurveToken
  * @author Kalp Team
- * @notice A bonding curve token that uses a linear pricing model and automatically graduates to a DEX
+ * @notice A bonding curve token that uses linear pricing and graduates to native POL trading on Uniswap V3
  * @dev This contract implements an ERC20 token with the following features:
  * 
  * BONDING CURVE MECHANICS:
  * - Uses linear bonding curve: price = basePrice + slope * totalSupply
- * - Users can buy/sell tokens at any time before graduation
+ * - Users buy/sell with native POL directly - no wrapping needed
  * - Price increases linearly with each token minted
- * - All ETH raised is held in the contract until graduation
+ * - All POL raised is held in the contract until graduation
  * 
  * GRADUATION SYSTEM:
  * - Token "graduates" when market cap reaches the graduation threshold
- * - Upon graduation, liquidity is automatically added to Uniswap V2
- * - Fees are distributed to liquidity, creator, and platform
- * - After graduation, normal DEX trading begins
+ * - Creates a myToken/POL trading experience on Uniswap V3
+ * - Technical implementation: TOKEN/WPOL pool with automatic wrapping
+ * - Users experience: Direct myToken/POL trading with native POL
+ * - Uses concentrated liquidity with full range position (-887220 to 887220 ticks)
+ * - After graduation, users trade myToken/POL as if it's a native pair
+ * 
+ * NATIVE POL INTEGRATION:
+ * - Bonding curve: Users send/receive native POL directly
+ * - Graduation: Automatically handles POL↔WPOL conversion for V3 compatibility
+ * - Post-graduation: V3 pool appears as myToken/POL to users
+ * - No manual wrapping required - contract handles all WPOL operations
  * 
  * FEE STRUCTURE:
  * - Trading fees: Applied on every buy/sell transaction (configurable)
  * - Graduation fees: Applied only upon graduation (liquidity/creator/platform split)
- * - All fees are collected by the platform fee collector address
+ * - All fees collected and distributed in native POL
  * 
  * SECURITY FEATURES:
  * - Blacklist functionality to block malicious addresses
@@ -56,7 +84,7 @@ interface IUniswapV2Router02 {
  * ACCESS CONTROL:
  * - Owner (Creator): Can pause/unpause, manage blacklist
  * - Factory: Can update fees, trigger graduation, update fee collector
- * - Users: Can buy/sell tokens, view information
+ * - Users: Can buy/sell tokens with native POL, view information
  */
 contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackList {
     
@@ -86,15 +114,15 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @dev Once true, buy/sell functions are disabled and only DEX trading is available
     bool public hasGraduated;
     
-    /// @notice The Uniswap V2 pair address created during graduation
+    /// @notice The Uniswap V3 pool address created during graduation
     /// @dev Only set after graduation, used for DEX trading
-    address public dexPair;
+    address public dexPool;
     
     /// @notice The address of the token creator
     /// @dev Also serves as the initial owner of the contract
     address public creator;
     
-    /// @notice Total ETH raised from token sales (excluding trading fees)
+    /// @notice Total POL raised from token sales (excluding trading fees)
     /// @dev Used for graduation fee calculations and liquidity provision
     uint256 public totalRaised;
     
@@ -110,13 +138,26 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     // DEX INTEGRATION
     // ═══════════════════════════════════════════════════════════════════════════════
     
-    /// @notice The Uniswap V2 Router contract used for liquidity provision
+    /// @notice The Uniswap V3 Position Manager contract used for liquidity provision
     /// @dev Set during deployment and cannot be changed
-    IUniswapV2Router02 public immutable uniswapV2Router;
+    INonfungiblePositionManager public immutable positionManager;
     
-    /// @notice The WETH token address from the Uniswap router
-    /// @dev Used for creating trading pairs during graduation
-    address public immutable WETH;
+    /// @notice The WPOL token address from the Uniswap V3 ecosystem on Polygon
+    /// @dev Technical requirement for V3 pools - users still interact with native POL
+    /// @dev Contract handles POL↔WPOL conversion automatically during graduation
+    address public immutable WPOL;
+    
+    /// @notice The Uniswap V3 factory contract
+    /// @dev Used for creating new pools during graduation
+    IUniswapV3Factory public immutable uniswapV3Factory;
+    
+    /// @notice The fee tier used for the V3 pool (0.3% = 3000)
+    /// @dev Standard fee tier for most token pairs
+    uint24 public constant POOL_FEE = 3000;
+    
+    /// @notice The NFT token ID representing the liquidity position
+    /// @dev Only set after graduation, represents the V3 LP position
+    uint256 public liquidityTokenId;
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // FEE CONFIGURATION
@@ -124,17 +165,17 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /// @notice Percentage of graduation fees allocated to liquidity (in basis points)
     /// @dev Applied only during graduation, typically 8000 (80%)
-    /// @dev These fees come from totalRaised ETH
+    /// @dev These fees come from totalRaised POL
     uint256 public immutable LIQUIDITY_FEE;
     
     /// @notice Percentage of graduation fees allocated to token creator (in basis points)
     /// @dev Applied only during graduation, typically 0 (0%)
-    /// @dev These fees come from totalRaised ETH
+    /// @dev These fees come from totalRaised POL
     uint256 public immutable CREATOR_FEE;
     
     /// @notice Percentage of graduation fees allocated to platform (in basis points)
     /// @dev Applied only during graduation, typically 2000 (20%)
-    /// @dev These fees come from totalRaised ETH
+    /// @dev These fees come from totalRaised POL
     uint256 public immutable PLATFORM_FEE;
     
     /// @notice Trading fee applied to buy operations (in basis points)
@@ -154,29 +195,30 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @notice Emitted when tokens are purchased via the bonding curve
     /// @param buyer Address that purchased the tokens
     /// @param amount Number of tokens purchased
-    /// @param cost Total ETH cost (excluding trading fees)
+    /// @param cost Total POL cost (excluding trading fees)
     /// @param newSupply New total supply after the purchase
     event TokensPurchased(address indexed buyer, uint256 amount, uint256 cost, uint256 newSupply);
     
     /// @notice Emitted when tokens are sold back to the bonding curve
     /// @param seller Address that sold the tokens
     /// @param amount Number of tokens sold
-    /// @param refund Total ETH refund (excluding trading fees)
+    /// @param refund Total POL refund (excluding trading fees)
     /// @param newSupply New total supply after the sale
     event TokensSold(address indexed seller, uint256 amount, uint256 refund, uint256 newSupply);
     
     /// @notice Emitted when the token graduates to DEX trading
     /// @param supply Total token supply at graduation
     /// @param marketCap Market cap that triggered graduation
-    /// @param dexPair Address of the created Uniswap V2 pair
-    /// @param liquidityAdded Amount of liquidity tokens received
-    event GraduationTriggered(uint256 supply, uint256 marketCap, address dexPair, uint256 liquidityAdded);
+    /// @param dexPool Address of the created Uniswap V3 pool
+    /// @param liquidityTokenId NFT token ID of the liquidity position
+    event GraduationTriggered(uint256 supply, uint256 marketCap, address dexPool, uint256 liquidityTokenId);
     
-    /// @notice Emitted when liquidity is added to Uniswap during graduation
+    /// @notice Emitted when liquidity is added to Uniswap V3 during graduation
     /// @param tokenAmount Number of tokens added to liquidity
-    /// @param ethAmount Amount of ETH added to liquidity
-    /// @param liquidity Amount of LP tokens received
-    event LiquidityAdded(uint256 tokenAmount, uint256 ethAmount, uint256 liquidity);
+    /// @param polAmount Amount of POL added to liquidity
+    /// @param liquidity Amount of liquidity added to the position
+    /// @param tokenId NFT token ID representing the position
+    event LiquidityAdded(uint256 tokenAmount, uint256 polAmount, uint128 liquidity, uint256 tokenId);
     
     /// @notice Emitted when trading fees are updated by the factory
     /// @param buyFee New buy trading fee in basis points
@@ -223,7 +265,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @param _graduationThreshold The market cap in wei that triggers graduation to DEX
      * @param _creator The address of the token creator (becomes owner)
      * @param _factory The address of the factory contract (gets admin permissions)
-     * @param _uniswapV2Router The address of the Uniswap V2 router for DEX integration
+     * @param _positionManager The address of the Uniswap V3 Position Manager for DEX integration
      * @param _liquidityFee Percentage of graduation fees for liquidity (basis points)
      * @param _creatorFee Percentage of graduation fees for creator (basis points)
      * @param _platformFee Percentage of graduation fees for platform (basis points)
@@ -245,7 +287,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 _graduationThreshold,
         address _creator,
         address _factory,
-        address _uniswapV2Router,
+        address _positionManager,
         uint256 _liquidityFee,
         uint256 _creatorFee,
         uint256 _platformFee,
@@ -261,7 +303,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Validate addresses
         require(_creator != address(0), "Creator cannot be zero address");
         require(_factory != address(0), "Factory cannot be zero address");
-        require(_uniswapV2Router != address(0), "Router cannot be zero address");
+        require(_positionManager != address(0), "Position manager cannot be zero address");
         require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
         
         // Validate fee structures
@@ -288,9 +330,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         buyTradingFee = _buyTradingFee;
         sellTradingFee = _sellTradingFee;
         
-        // Initialize DEX integration
-        uniswapV2Router = IUniswapV2Router02(_uniswapV2Router);
-        WETH = uniswapV2Router.WETH();
+        // Initialize DEX integration with Uniswap V3 on Polygon
+        positionManager = INonfungiblePositionManager(_positionManager);
+        uniswapV3Factory = IUniswapV3Factory(positionManager.factory());
+        WPOL = positionManager.WETH9(); // Note: WETH9() returns WPOL on Polygon
         
         // Transfer ownership to creator (they can pause, manage blacklist, etc.)
         _transferOwnership(_creator);
@@ -342,8 +385,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Calculate the area under the linear bonding curve
         // This represents the total cost for buying 'amount' tokens
         totalCost = basePrice * amount + 
-                   slope * currentSupply * amount + 
-                   slope * amount * (amount - 1) / 2;
+                      slope * currentSupply * amount + 
+                      slope * amount * (amount - 1) / 2;
         
         return totalCost;
     }
@@ -377,8 +420,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Calculate the area under the curve from newSupply to currentSupply
         // This represents the refund for selling 'amount' tokens
         totalRefund = basePrice * amount + 
-                     slope * newSupply * amount + 
-                     slope * amount * (amount - 1) / 2;
+                        slope * newSupply * amount + 
+                        slope * amount * (amount - 1) / 2;
         
         return totalRefund;
     }
@@ -437,7 +480,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     // ═══════════════════════════════════════════════════════════════════════════════
     
     /**
-     * @notice Buy tokens using ETH through the bonding curve
+     * @notice Buy tokens using POL through the bonding curve
      * @dev This function handles the complete buy process including trading fees
      * @dev Only available before graduation - after graduation, use DEX
      * 
@@ -446,7 +489,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 2. Calculate and collect trading fee
      * 3. Mint tokens to buyer
      * 4. Update totalRaised (excluding trading fee)
-     * 5. Refund any excess ETH
+     * 5. Refund any excess POL
      * 6. Check if graduation threshold is reached
      * 
      * @param amount Number of tokens to buy (must be > 0)
@@ -455,7 +498,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * - Token must not be graduated yet
      * - Contract must not be paused
      * - Amount must be greater than 0
-     * - Must send enough ETH to cover cost + trading fee
+     * - Must send enough POL to cover cost + trading fee
      * 
      * Emits:
      * - TokensPurchased event with purchase details
@@ -479,8 +522,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Total cost including trading fee
         uint256 totalCost = cost + tradingFee;
         
-        // Ensure user sent enough ETH
-        require(msg.value >= totalCost, "Insufficient ETH sent");
+        // Ensure user sent enough POL
+        require(msg.value >= totalCost, "Insufficient POL sent");
         
         // Mint tokens to the buyer
         _mint(msg.sender, amount);
@@ -494,7 +537,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             payable(platformFeeCollector).transfer(tradingFee);
         }
         
-        // Refund any excess ETH sent by the user
+        // Refund any excess POL sent by the user
         if (msg.value > totalCost) {
             payable(msg.sender).transfer(msg.value - totalCost);
         }
@@ -507,7 +550,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     }
     
     /**
-     * @notice Sell tokens back to the bonding curve for ETH
+     * @notice Sell tokens back to the bonding curve for POL
      * @dev This function handles the complete sell process including trading fees
      * @dev Only available before graduation - after graduation, use DEX
      * 
@@ -525,7 +568,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * - Contract must not be paused
      * - Amount must be greater than 0
      * - Seller must have enough token balance
-     * - Contract must have enough ETH balance for refund
+     * - Contract must have enough POL balance for refund
      * 
      * Emits:
      * - TokensSold event with sale details
@@ -549,7 +592,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Net refund to seller after trading fee deduction
         uint256 netRefund = refund - tradingFee;
         
-        // Ensure contract has enough ETH for the full refund
+        // Ensure contract has enough POL for the full refund
         require(address(this).balance >= refund, "Insufficient contract balance");
         
         // Burn tokens from the seller (reduces total supply)
@@ -595,13 +638,26 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @dev This is the most critical function - it transitions from bonding curve to DEX
      * @dev Once called, the token can never return to bonding curve trading
      * 
-     * Graduation Process:
+     * Graduation Process (Native POL UX):
      * 1. Mark token as graduated (disables buy/sell functions)
-     * 2. Create Uniswap V2 trading pair (TOKEN/WETH)
+     * 2. Create myToken/POL trading pool on Uniswap V3
      * 3. Mint additional tokens equal to current supply for liquidity
-     * 4. Calculate ETH amount for liquidity (LIQUIDITY_FEE % of totalRaised)
-     * 5. Add liquidity to Uniswap V2 pair
-     * 6. Distribute remaining fees to creator and platform
+     * 4. Convert POL to WPOL automatically (transparent to users)
+     * 5. Calculate liquidity amounts (LIQUIDITY_FEE % of totalRaised)
+     * 6. Create full range V3 position for maximum liquidity coverage
+     * 7. Distribute remaining fees to creator and platform in native POL
+     * 
+     * User Experience:
+     * - Users see and trade myToken/POL pairs directly
+     * - No manual wrapping/unwrapping required
+     * - All DEX interactions feel like native POL trading
+     * - Contract handles technical WPOL requirements behind the scenes
+     * 
+     * Technical Implementation:
+     * - V3 pool is technically TOKEN/WPOL (V3 requirement)
+     * - Automatic POL↔WPOL conversion during graduation
+     * - Full range position (-887220 to 887220 ticks) for maximum coverage
+     * - Position represented as NFT for advanced management
      * 
      * Token Supply Impact:
      * - Before graduation: X tokens in circulation
@@ -610,16 +666,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      * Economic Impact:
      * - Sets initial DEX price based on bonding curve final price
-     * - Creates immediate liquidity for DEX trading
-     * - Enables normal ERC20 functionality
+     * - Creates immediate myToken/POL liquidity for trading
+     * - Uses concentrated liquidity for maximum capital efficiency
      */
     function _graduate() internal {
         // Mark token as graduated (no more bonding curve trading)
         hasGraduated = true;
-        
-        // Create Uniswap V2 pair for TOKEN/WETH trading
-        IUniswapV2Factory factoryContract = IUniswapV2Factory(uniswapV2Router.factory());
-        dexPair = factoryContract.createPair(address(this), WETH);
         
         // Calculate amounts for liquidity provision
         uint256 currentSupply = totalSupply();
@@ -627,69 +679,108 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Mint equal amount of tokens for liquidity (doubles total supply)
         uint256 liquidityTokenAmount = currentSupply;
         
-        // Calculate ETH for liquidity (typically 80% of totalRaised)
-        uint256 liquidityEthAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
+        // Calculate POL for liquidity (typically 80% of totalRaised)
+        uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
         
-        // Mint additional tokens to this contract for liquidity
+        // Create myToken/POL pool on Uniswap V3 (technical: TOKEN/WPOL for V3 compatibility)
+        address token0;
+        address token1;
+        if (address(this) < WPOL) {
+            token0 = address(this);
+            token1 = WPOL;
+        } else {
+            token0 = WPOL;
+            token1 = address(this);
+        }
+        
+        // Create the myToken/POL trading pool (appears as TOKEN/WPOL to V3)
+        dexPool = uniswapV3Factory.getPool(token0, token1, POOL_FEE);
+        if (dexPool == address(0)) {
+            dexPool = uniswapV3Factory.createPool(token0, token1, POOL_FEE);
+        }
+        
+        // Convert native POL to WPOL automatically (transparent to users)
+        IWPOL(WPOL).deposit{value: liquidityPolAmount}();
+        
+        // Mint additional tokens for the myToken/POL liquidity pool
         _mint(address(this), liquidityTokenAmount);
         
-        // Approve Uniswap router to spend our tokens
-        _approve(address(this), address(uniswapV2Router), liquidityTokenAmount);
+        // Approve Uniswap V3 to manage our tokens and WPOL for the pool
+        _approve(address(this), address(positionManager), liquidityTokenAmount);
+        IWPOL(WPOL).approve(address(positionManager), liquidityPolAmount);
         
-        // Add liquidity to Uniswap V2 with slippage protection
-        (uint256 amountToken, uint256 amountETH, uint256 liquidity) = uniswapV2Router.addLiquidityETH{
-            value: liquidityEthAmount
-        }(
-            address(this),                    // Token address
-            liquidityTokenAmount,             // Desired token amount
-            liquidityTokenAmount * 95 / 100,  // Min token amount (5% slippage)
-            liquidityEthAmount * 95 / 100,    // Min ETH amount (5% slippage)
-            address(this),                    // LP tokens recipient (contract keeps them)
-            block.timestamp + 300             // 5 minute deadline
-        );
+        // Define full range position for maximum myToken/POL liquidity coverage
+        int24 tickLower = -887220;  // Min tick for full range (covers all price levels)
+        int24 tickUpper = 887220;   // Max tick for full range (ensures liquidity everywhere)
+        
+        // Set up parameters for myToken/POL pool creation
+        INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
+            token0: token0,                      // First token in the pair (sorted by address)
+            token1: token1,                      // Second token in the pair  
+            fee: POOL_FEE,                       // 0.3% fee tier standard for most pairs
+            tickLower: tickLower,                // Full range minimum
+            tickUpper: tickUpper,                // Full range maximum
+            amount0Desired: token0 == address(this) ? liquidityTokenAmount : liquidityPolAmount,
+            amount1Desired: token1 == address(this) ? liquidityTokenAmount : liquidityPolAmount,
+            amount0Min: token0 == address(this) ? liquidityTokenAmount * 95 / 100 : liquidityPolAmount * 95 / 100,  // 5% slippage protection
+            amount1Min: token1 == address(this) ? liquidityTokenAmount * 95 / 100 : liquidityPolAmount * 95 / 100,  // 5% slippage protection
+            recipient: address(this),            // Contract owns the LP position
+            deadline: block.timestamp + 300     // 5 minute deadline for execution
+        });
+        
+        // Create the myToken/POL liquidity position on Uniswap V3
+        (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = positionManager.mint(mintParams);
+        
+        // Store the NFT representing our myToken/POL liquidity position
+        liquidityTokenId = tokenId;
         
         // Distribute remaining fees to creator and platform
         _distributeFees();
         
-        // Emit events for tracking
-        emit GraduationTriggered(currentSupply, getMarketCap(), dexPair, liquidity);
-        emit LiquidityAdded(amountToken, amountETH, liquidity);
+        // Emit events for tracking the successful myToken/POL pool creation
+        emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokenId);
+        emit LiquidityAdded(
+            token0 == address(this) ? amount0 : amount1, // myToken amount added to pool
+            token0 == address(this) ? amount1 : amount0, // POL equivalent added to pool
+            liquidity,                                   // V3 liquidity amount created
+            tokenId                                      // NFT ID representing the position
+        );
     }
     
     /**
      * @notice Internal function to distribute graduation fees
-     * @dev Called during graduation to distribute remaining ETH after liquidity provision
-     * @dev Only distributes ETH that remains after liquidity has been added
+     * @dev Called during graduation to distribute remaining POL after liquidity provision
+     * @dev Only distributes POL that remains after liquidity has been added
      * 
      * Fee Distribution:
-     * 1. Calculate remaining ETH balance after liquidity provision
+     * 1. Calculate remaining POL balance after liquidity provision
      * 2. Distribute creator fee (typically 0%)
      * 3. Distribute platform fee (typically 20%)
-     * 4. Any remaining ETH stays in contract (should be minimal due to fee structure)
+     * 4. Any remaining POL stays in contract (should be minimal due to fee structure)
      * 
-     * Example with totalRaised = 100 ETH:
-     * - Liquidity gets 80 ETH (LIQUIDITY_FEE = 8000 basis points)
-     * - After liquidity, remaining = ~20 ETH
-     * - Creator gets 0 ETH (CREATOR_FEE = 0 basis points)
-     * - Platform gets 20 ETH (PLATFORM_FEE = 2000 basis points)
+     * Example with totalRaised = 100 POL:
+     * - Liquidity gets 80 POL (LIQUIDITY_FEE = 8000 basis points)
+     * - After liquidity, remaining = ~20 POL
+     * - Creator gets 0 POL (CREATOR_FEE = 0 basis points)
+     * - Platform gets 20 POL (PLATFORM_FEE = 2000 basis points)
      */
     function _distributeFees() internal {
-        // Get remaining ETH balance after liquidity provision
-        uint256 remainingEth = address(this).balance;
+        // Get remaining POL balance after liquidity provision
+        uint256 remainingPol = address(this).balance;
         
         // Calculate and distribute creator fee
-        uint256 creatorFee = (remainingEth * CREATOR_FEE) / 10000;
+        uint256 creatorFee = (remainingPol * CREATOR_FEE) / 10000;
         if (creatorFee > 0) {
             payable(creator).transfer(creatorFee);
         }
         
         // Calculate and distribute platform fee
-        uint256 platformFee = (remainingEth * PLATFORM_FEE) / 10000;
+        uint256 platformFee = (remainingPol * PLATFORM_FEE) / 10000;
         if (platformFee > 0) {
             payable(platformFeeCollector).transfer(platformFee);
         }
         
-        // Note: Any remaining ETH (due to rounding) stays in the contract
+        // Note: Any remaining POL (due to rounding) stays in the contract
         // This should be minimal due to the fee structure design
     }
     
@@ -824,7 +915,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @return graduationProgress Graduation progress in basis points (0-10000)
      * @return remainingForGraduation Remaining market cap needed for graduation in wei
      * @return graduated Whether the token has graduated to DEX
-     * @return pairAddress DEX pair address (zero if not graduated)
+     * @return poolAddress V3 pool address (zero if not graduated)
      * 
      * Usage:
      * - Frontend dashboards
@@ -839,14 +930,14 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 graduationProgress,
         uint256 remainingForGraduation,
         bool graduated,
-        address pairAddress
+        address poolAddress
     ) {
         currentPrice = getCurrentPrice();
         currentSupply = totalSupply();
         marketCap = getMarketCap();
         (graduationProgress, remainingForGraduation) = getGraduationProgress();
         graduated = hasGraduated;
-        pairAddress = dexPair;
+        poolAddress = dexPool;
     }
     
     /**
@@ -941,27 +1032,27 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     }
     
     /**
-     * @notice Receives ETH sent directly to the contract
-     * @dev Allows the contract to accept ETH for liquidity and fee operations
-     * @dev ETH can be sent for various reasons:
+     * @notice Receives POL sent directly to the contract
+     * @dev Allows the contract to accept POL for liquidity and fee operations
+     * @dev POL can be sent for various reasons:
      *   - Direct donations
      *   - Refunds from failed DEX operations
      *   - Gas stipend refunds
      * 
      * Note: This does NOT trigger token purchases
-     * Use buyTokens() function to purchase tokens with ETH
+     * Use buyTokens() function to purchase tokens with POL
      */
     receive() external payable {}
     
     /**
      * @notice Fallback function for handling unexpected calls
      * @dev Called when contract is called with data that doesn't match any function
-     * @dev Also accepts ETH to ensure contract doesn't reject unexpected payments
+     * @dev Also accepts POL to ensure contract doesn't reject unexpected payments
      * 
      * Security Note:
      * - Does not execute any logic
-     * - Simply accepts ETH if sent
-     * - Prevents accidental ETH loss from misformed calls
+     * - Simply accepts POL if sent
+     * - Prevents accidental POL loss from misformed calls
      */
     fallback() external payable {}
 }
