@@ -37,6 +37,11 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     uint256 public creationFee = 0.01 ether; // Default creation fee
     address public uniswapV2Router;
     
+    // Default fee distribution percentages (in basis points, 10000 = 100%)
+    uint256 public liquidityFee = 8000;  // 80% 
+    uint256 public creatorFee = 0;       // 0%
+    uint256 public platformFee = 2000;   // 20%
+    
     // Token tracking
     TokenInfo[] public tokens;
     mapping(address => uint256) public tokenIndex;
@@ -70,6 +75,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     event CreationFeeUpdated(uint256 oldFee, uint256 newFee);
     event FeesWithdrawn(address indexed owner, uint256 amount);
     event RouterUpdated(address indexed oldRouter, address indexed newRouter);
+    event FeeDistributionUpdated(uint256 liquidityFee, uint256 creatorFee, uint256 platformFee);
     
     // Modifiers
     modifier validTokenAddress(address token) {
@@ -155,7 +161,10 @@ contract TokenFactory is Ownable, ReentrancyGuard {
             graduationThreshold,
             msg.sender,
             address(this),
-            uniswapV2Router
+            uniswapV2Router,
+            liquidityFee,
+            creatorFee,
+            platformFee
         );
         
         tokenAddress = address(newToken);
@@ -210,35 +219,6 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Get tokens filtered by graduation status
-     * @param graduated True for graduated tokens, false for active tokens
-     * @return tokenAddresses Array of token addresses
-     */
-    function getTokensByStatus(bool graduated) external view returns (address[] memory tokenAddresses) {
-        uint256 count = 0;
-        
-        // Count tokens with the specified status
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i].hasGraduated == graduated) {
-                count++;
-            }
-        }
-        
-        // Create array and populate it
-        tokenAddresses = new address[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i].hasGraduated == graduated) {
-                tokenAddresses[index] = tokens[i].tokenAddress;
-                index++;
-            }
-        }
-        
-        return tokenAddresses;
-    }
-    
-    /**
      * @dev Get tokens created by a specific creator
      * @param creator Creator address
      * @return tokenAddresses Array of token addresses created by the creator
@@ -252,33 +232,6 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         }
         
         return tokenAddresses;
-    }
-    
-    /**
-     * @dev Get comprehensive factory statistics
-     * @return stats Factory statistics struct
-     */
-    function getFactoryStats() external view returns (FactoryStats memory stats) {
-        uint256 graduatedCount = 0;
-        uint256 activeCount = 0;
-        
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i].hasGraduated) {
-                graduatedCount++;
-            } else {
-                activeCount++;
-            }
-        }
-        
-        stats = FactoryStats({
-            totalTokens: tokens.length,
-            totalGraduated: graduatedCount,
-            totalActiveTokens: activeCount,
-            totalFeesCollected: totalFeesCollected,
-            totalVolume: totalVolume
-        });
-        
-        return stats;
     }
     
     /**
@@ -301,6 +254,36 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         creationFee = newFee;
         
         emit CreationFeeUpdated(oldFee, newFee);
+    }
+    
+    /**
+     * @dev Update fee distribution percentages (owner only)
+     * @param _liquidityFee New liquidity fee in basis points
+     * @param _creatorFee New creator fee in basis points  
+     * @param _platformFee New platform fee in basis points
+     */
+    function updateFeeDistribution(
+        uint256 _liquidityFee, 
+        uint256 _creatorFee, 
+        uint256 _platformFee
+    ) external onlyOwner {
+        require(_liquidityFee + _creatorFee + _platformFee == 10000, "Fees must sum to 10000 (100%)");
+        require(_liquidityFee >= 5000, "Liquidity fee must be at least 50% for proper DEX functionality");
+        require(_platformFee <= 3000, "Platform fee cannot exceed 30%");
+        
+        liquidityFee = _liquidityFee;
+        creatorFee = _creatorFee;
+        platformFee = _platformFee;
+        
+        emit FeeDistributionUpdated(_liquidityFee, _creatorFee, _platformFee);
+    }
+    
+    /**
+     * @dev Get current fee distribution percentages
+     * @return Current liquidity, creator, and platform fee percentages
+     */
+    function getFeeDistribution() external view returns (uint256, uint256, uint256) {
+        return (liquidityFee, creatorFee, platformFee);
     }
     
     /**
@@ -347,78 +330,6 @@ contract TokenFactory is Ownable, ReentrancyGuard {
             tokens[index].dexPair,
             0 // Platform fee handled internally by token
         );
-    }
-    
-    /**
-     * @dev Get paginated token list
-     * @param offset Starting index
-     * @param limit Maximum number of tokens to return
-     * @return tokenAddresses Array of token addresses
-     * @return hasMore Whether there are more tokens available
-     */
-    function getTokensPaginated(uint256 offset, uint256 limit) external view returns (
-        address[] memory tokenAddresses,
-        bool hasMore
-    ) {
-        require(offset < tokens.length, "Offset out of bounds");
-        
-        uint256 end = offset + limit;
-        if (end > tokens.length) {
-            end = tokens.length;
-        }
-        
-        uint256 count = end - offset;
-        tokenAddresses = new address[](count);
-        
-        for (uint256 i = 0; i < count; i++) {
-            tokenAddresses[i] = tokens[offset + i].tokenAddress;
-        }
-        
-        hasMore = end < tokens.length;
-        
-        return (tokenAddresses, hasMore);
-    }
-    
-    /**
-     * @dev Get recent tokens (last N tokens created)
-     * @param count Number of recent tokens to return
-     * @return tokenAddresses Array of recent token addresses
-     */
-    function getRecentTokens(uint256 count) external view returns (address[] memory tokenAddresses) {
-        if (tokens.length == 0) {
-            return new address[](0);
-        }
-        
-        uint256 start = tokens.length > count ? tokens.length - count : 0;
-        uint256 actualCount = tokens.length - start;
-        
-        tokenAddresses = new address[](actualCount);
-        
-        for (uint256 i = 0; i < actualCount; i++) {
-            tokenAddresses[i] = tokens[start + i].tokenAddress;
-        }
-        
-        return tokenAddresses;
-    }
-    
-    /**
-     * @dev Check if a token has graduated
-     * @param token Token address
-     * @return hasGraduated Whether the token has graduated
-     */
-    function isTokenGraduated(address token) external view validTokenAddress(token) returns (bool) {
-        uint256 index = tokenIndex[token];
-        return tokens[index].hasGraduated;
-    }
-    
-    /**
-     * @dev Get token creation timestamp
-     * @param token Token address
-     * @return createdAt Creation timestamp
-     */
-    function getTokenCreationTime(address token) external view validTokenAddress(token) returns (uint256) {
-        uint256 index = tokenIndex[token];
-        return tokens[index].createdAt;
     }
     
     /**

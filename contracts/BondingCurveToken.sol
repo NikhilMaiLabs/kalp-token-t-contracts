@@ -47,9 +47,9 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     address public immutable WETH;
     
     // Fee distribution percentages (in basis points, 10000 = 100%)
-    uint256 public constant LIQUIDITY_FEE = 8000;  // 80%
-    uint256 public constant CREATOR_FEE = 0;    // 0%
-    uint256 public constant PLATFORM_FEE = 2000;   // 20%
+    uint256 public immutable LIQUIDITY_FEE;  // 80%
+    uint256 public immutable CREATOR_FEE;    // 0%
+    uint256 public immutable PLATFORM_FEE;   // 20%
     
     // Events
     event TokensPurchased(address indexed buyer, uint256 amount, uint256 cost, uint256 newSupply);
@@ -81,7 +81,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
         uint256 _graduationThreshold,
         address _creator,
         address _factory,
-        address _uniswapV2Router
+        address _uniswapV2Router,
+        uint256 _liquidityFee,
+        uint256 _creatorFee,
+        uint256 _platformFee
     ) ERC20(name, symbol) Ownable(_creator) {
         require(_slope > 0, "Slope must be greater than 0");
         require(_basePrice > 0, "Base price must be greater than 0");
@@ -89,12 +92,16 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
         require(_creator != address(0), "Creator cannot be zero address");
         require(_factory != address(0), "Factory cannot be zero address");
         require(_uniswapV2Router != address(0), "Router cannot be zero address");
+        require(_liquidityFee + _creatorFee + _platformFee == 10000, "Fees must sum to 10000 (100%)");
         
         slope = _slope;
         basePrice = _basePrice;
         graduationThreshold = _graduationThreshold;
         creator = _creator;
         factory = _factory;
+        LIQUIDITY_FEE = _liquidityFee;
+        CREATOR_FEE = _creatorFee;
+        PLATFORM_FEE = _platformFee;
         
         uniswapV2Router = IUniswapV2Router02(_uniswapV2Router);
         WETH = uniswapV2Router.WETH();
