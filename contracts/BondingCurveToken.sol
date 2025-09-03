@@ -40,6 +40,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     address public creator;         // Token creator address
     uint256 public totalRaised;     // Total ETH raised
     address public factory;         // Factory contract address
+    address public platformFeeCollector; // Platform fee collector address
     
     // DEX integration
     IUniswapV2Router02 public immutable uniswapV2Router;
@@ -50,11 +51,16 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     uint256 public immutable CREATOR_FEE;    // 0%
     uint256 public immutable PLATFORM_FEE;   // 20%
     
+    // Trading fees (in basis points, 10000 = 100%)
+    uint256 public buyTradingFee;    // Trading fee on buy operations
+    uint256 public sellTradingFee;   // Trading fee on sell operations
+    
     // Events
     event TokensPurchased(address indexed buyer, uint256 amount, uint256 cost, uint256 newSupply);
     event TokensSold(address indexed seller, uint256 amount, uint256 refund, uint256 newSupply);
     event GraduationTriggered(uint256 supply, uint256 marketCap, address dexPair, uint256 liquidityAdded);
     event LiquidityAdded(uint256 tokenAmount, uint256 ethAmount, uint256 liquidity);
+    event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
     
     // Modifiers
     modifier onlyFactory() {
@@ -83,7 +89,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         address _uniswapV2Router,
         uint256 _liquidityFee,
         uint256 _creatorFee,
-        uint256 _platformFee
+        uint256 _platformFee,
+        address _platformFeeCollector,
+        uint256 _buyTradingFee,
+        uint256 _sellTradingFee
     ) ERC20(name, symbol) Ownable(_creator) {
         require(_slope > 0, "Slope must be greater than 0");
         require(_basePrice > 0, "Base price must be greater than 0");
@@ -91,16 +100,22 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         require(_creator != address(0), "Creator cannot be zero address");
         require(_factory != address(0), "Factory cannot be zero address");
         require(_uniswapV2Router != address(0), "Router cannot be zero address");
+        require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
         require(_liquidityFee + _creatorFee + _platformFee == 10000, "Fees must sum to 10000 (100%)");
+        require(_buyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
+        require(_sellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
         
         slope = _slope;
         basePrice = _basePrice;
         graduationThreshold = _graduationThreshold;
         creator = _creator;
         factory = _factory;
+        platformFeeCollector = _platformFeeCollector;
         LIQUIDITY_FEE = _liquidityFee;
         CREATOR_FEE = _creatorFee;
         PLATFORM_FEE = _platformFee;
+        buyTradingFee = _buyTradingFee;
+        sellTradingFee = _sellTradingFee;
         
         uniswapV2Router = IUniswapV2Router02(_uniswapV2Router);
         WETH = uniswapV2Router.WETH();
@@ -191,17 +206,25 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         require(amount > 0, "Amount must be greater than 0");
         
         uint256 cost = getBuyPrice(amount);
-        require(msg.value >= cost, "Insufficient ETH sent");
+        uint256 tradingFee = (cost * buyTradingFee) / 10000;
+        uint256 totalCost = cost + tradingFee;
+        
+        require(msg.value >= totalCost, "Insufficient ETH sent");
         
         // Mint tokens to buyer
         _mint(msg.sender, amount);
         
-        // Update total raised
+        // Update total raised (only the base cost, not the trading fee)
         totalRaised += cost;
         
+        // Collect trading fee
+        if (tradingFee > 0) {
+            payable(platformFeeCollector).transfer(tradingFee);
+        }
+        
         // Refund excess ETH
-        if (msg.value > cost) {
-            payable(msg.sender).transfer(msg.value - cost);
+        if (msg.value > totalCost) {
+            payable(msg.sender).transfer(msg.value - totalCost);
         }
         
         emit TokensPurchased(msg.sender, amount, cost, totalSupply());
@@ -219,16 +242,24 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         require(balanceOf(msg.sender) >= amount, "Insufficient token balance");
         
         uint256 refund = getSellPrice(amount);
+        uint256 tradingFee = (refund * sellTradingFee) / 10000;
+        uint256 netRefund = refund - tradingFee;
+        
         require(address(this).balance >= refund, "Insufficient contract balance");
         
         // Burn tokens from seller
         _burn(msg.sender, amount);
         
-        // Update total raised
+        // Update total raised (only the base refund, not the trading fee)
         totalRaised -= refund;
         
-        // Transfer ETH to seller
-        payable(msg.sender).transfer(refund);
+        // Collect trading fee
+        if (tradingFee > 0) {
+            payable(platformFeeCollector).transfer(tradingFee);
+        }
+        
+        // Transfer net refund to seller
+        payable(msg.sender).transfer(netRefund);
         
         emit TokensSold(msg.sender, amount, refund, totalSupply());
     }
@@ -292,11 +323,35 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             payable(creator).transfer(creatorFee);
         }
         
-        // Distribute platform fee to factory
+        // Distribute platform fee to platform fee collector
         uint256 platformFee = (remainingEth * PLATFORM_FEE) / 10000;
         if (platformFee > 0) {
-            payable(factory).transfer(platformFee);
+            payable(platformFeeCollector).transfer(platformFee);
         }
+    }
+    
+    /**
+     * @dev Update platform fee collector address (factory only)
+     * @param newPlatformFeeCollector New platform fee collector address
+     */
+    function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyFactory {
+        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+        platformFeeCollector = newPlatformFeeCollector;
+    }
+    
+    /**
+     * @dev Update trading fees (factory only)
+     * @param newBuyTradingFee New buy trading fee in basis points
+     * @param newSellTradingFee New sell trading fee in basis points
+     */
+    function updateTradingFees(uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyFactory {
+        require(newBuyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
+        require(newSellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
+        
+        buyTradingFee = newBuyTradingFee;
+        sellTradingFee = newSellTradingFee;
+        
+        emit TradingFeesUpdated(newBuyTradingFee, newSellTradingFee);
     }
     
     /**
@@ -338,6 +393,13 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         (graduationProgress, remainingForGraduation) = getGraduationProgress();
         graduated = hasGraduated;
         pairAddress = dexPair;
+    }
+    
+    /**
+     * @dev Get trading fees information
+     */
+    function getTradingFees() external view returns (uint256, uint256) {
+        return (buyTradingFee, sellTradingFee);
     }
 
     function blockAccount(address _account) public onlyOwner {

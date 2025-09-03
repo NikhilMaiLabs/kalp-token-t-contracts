@@ -36,11 +36,16 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     // State variables
     uint256 public creationFee = 0.01 ether; // Default creation fee
     address public uniswapV2Router;
+    address public platformFeeCollector; // Platform fee collector address
     
     // Default fee distribution percentages (in basis points, 10000 = 100%)
     uint256 public liquidityFee = 8000;  // 80% 
     uint256 public creatorFee = 0;       // 0%
     uint256 public platformFee = 2000;   // 20%
+    
+    // Default trading fees (in basis points, 10000 = 100%)
+    uint256 public buyTradingFee = 0;    // 0% buy trading fee
+    uint256 public sellTradingFee = 0;   // 0% sell trading fee
     
     // Token tracking
     TokenInfo[] public tokens;
@@ -76,6 +81,8 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     event FeesWithdrawn(address indexed owner, uint256 amount);
     event RouterUpdated(address indexed oldRouter, address indexed newRouter);
     event FeeDistributionUpdated(uint256 liquidityFee, uint256 creatorFee, uint256 platformFee);
+    event PlatformFeeCollectorUpdated(address indexed oldCollector, address indexed newCollector);
+    event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
     
     // Modifiers
     modifier validTokenAddress(address token) {
@@ -99,9 +106,11 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         _;
     }
 
-    constructor(address _uniswapV2Router) Ownable(msg.sender) {
+    constructor(address _uniswapV2Router, address _platformFeeCollector, address _owner) Ownable(_owner) {
         require(_uniswapV2Router != address(0), "Router cannot be zero address");
+        require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
         uniswapV2Router = _uniswapV2Router;
+        platformFeeCollector = _platformFeeCollector;
     }
     
     /**
@@ -164,7 +173,10 @@ contract TokenFactory is Ownable, ReentrancyGuard {
             uniswapV2Router,
             liquidityFee,
             creatorFee,
-            platformFee
+            platformFee,
+            platformFeeCollector,
+            buyTradingFee,
+            sellTradingFee
         );
         
         tokenAddress = address(newToken);
@@ -284,6 +296,62 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      */
     function getFeeDistribution() external view returns (uint256, uint256, uint256) {
         return (liquidityFee, creatorFee, platformFee);
+    }
+    
+    /**
+     * @dev Get current trading fees
+     * @return Current buy and sell trading fee percentages
+     */
+    function getTradingFees() external view returns (uint256, uint256) {
+        return (buyTradingFee, sellTradingFee);
+    }
+    
+    /**
+     * @dev Update platform fee collector address for future tokens (owner only)
+     * @param newPlatformFeeCollector New platform fee collector address
+     */
+    function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyOwner {
+        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+        address oldCollector = platformFeeCollector;
+        platformFeeCollector = newPlatformFeeCollector;
+        
+        emit PlatformFeeCollectorUpdated(oldCollector, newPlatformFeeCollector);
+    }
+
+    /**
+     * @dev Update platform fee collector address from factory to existing token (owner only)
+     * @param token Token address
+     * @param newPlatformFeeCollector New platform fee collector address
+     */
+    function updatePlatformFeeCollectorOnExistingToken(address token, address newPlatformFeeCollector) external onlyOwner validTokenAddress(token) {
+        BondingCurveToken tokenContract = BondingCurveToken(payable(token));
+        tokenContract.updatePlatformFeeCollector(newPlatformFeeCollector);
+    }
+    
+    /**
+     * @dev Update trading fees for future tokens (owner only)
+     * @param newBuyTradingFee New buy trading fee in basis points
+     * @param newSellTradingFee New sell trading fee in basis points
+     */
+    function updateTradingFees(uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyOwner {
+        require(newBuyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
+        require(newSellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
+        
+        buyTradingFee = newBuyTradingFee;
+        sellTradingFee = newSellTradingFee;
+        
+        emit TradingFeesUpdated(newBuyTradingFee, newSellTradingFee);
+    }
+    
+    /**
+     * @dev Update trading fees for existing token (owner only)
+     * @param token Token address
+     * @param newBuyTradingFee New buy trading fee in basis points
+     * @param newSellTradingFee New sell trading fee in basis points
+     */
+    function updateTradingFeesOnExistingToken(address token, uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyOwner validTokenAddress(token) {
+        BondingCurveToken tokenContract = BondingCurveToken(payable(token));
+        tokenContract.updateTradingFees(newBuyTradingFee, newSellTradingFee);
     }
     
     /**

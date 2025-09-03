@@ -14,6 +14,7 @@ const config: HardhatUserConfig = {
             enabled: true,
             runs: 1, // Low runs value for deployment size optimization
           },
+          viaIR: true, // Enable IR-based code generation to handle stack too deep
         },
       },
       production: {
@@ -23,6 +24,7 @@ const config: HardhatUserConfig = {
             enabled: true,
             runs: 200,
           },
+          viaIR: true, // Enable IR-based code generation to handle stack too deep
         },
       },
     },
