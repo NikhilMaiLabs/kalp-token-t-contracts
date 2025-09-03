@@ -311,7 +311,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Manual graduation trigger for emergency cases (owner only)
+     * @dev Manual graduation trigger for emergency cases (owner only) // TODO: currently in dev mode to test graduations will be removed later
      * @param token Token address to graduate
      */
     function triggerGraduation(address token) external onlyOwner validTokenAddress(token) {

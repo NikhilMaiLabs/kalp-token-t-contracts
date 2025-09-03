@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./utils/Blacklist.sol";
 
 interface IUniswapV2Factory {
     function createPair(address tokenA, address tokenB) external returns (address pair);
@@ -23,13 +24,11 @@ interface IUniswapV2Router02 {
     ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
 }
 
-
-
 /**
  * @title BondingCurveToken
  * @dev ERC20 token with linear bonding curve pricing and automatic graduation to DEX
  */
-contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
+contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackList {
     // Bonding curve parameters
     uint256 public slope;           // Price increase per token (in wei)
     uint256 public basePrice;       // Initial token price (in wei)
@@ -301,7 +300,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     }
     
     /**
-     * @dev Manual graduation trigger (factory only)
+     * @dev Manual graduation trigger (factory only)  // TODO: currently in dev mode to test graduations will be removed later
      */
     function triggerGraduation() external onlyFactory notGraduated {
         _graduate();
@@ -322,17 +321,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     }
     
     /**
-     * @dev Override transfer to check graduation status
-     */
-    function _update(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override whenNotPaused {
-        super._update(from, to, amount);
-    }
-    
-    /**
      * @dev Get token information
      */
     function getTokenInfo() external view returns (
@@ -350,6 +338,25 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable {
         (graduationProgress, remainingForGraduation) = getGraduationProgress();
         graduated = hasGraduated;
         pairAddress = dexPair;
+    }
+
+    function blockAccount(address _account) public onlyOwner {
+        _blockAccount(_account);
+    }
+
+    function unblockAccount(address _account) public onlyOwner {
+        _unblockAccount(_account);
+    }
+
+    /**
+     * @dev Override transfer to check black list status
+     */
+
+    function _update(address from, address to, uint256 amount) internal override whenNotPaused {
+        require(!isAccountBlocked(to), "BlackList: Recipient account is blocked");
+        require(!isAccountBlocked(from), "BlackList: Sender account is blocked");
+
+        super._update(from, to, amount);
     }
     
     /**
