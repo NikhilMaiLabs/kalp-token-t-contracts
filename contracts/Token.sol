@@ -4,16 +4,18 @@ pragma solidity ^0.8.24;
 
 import "./utils/ERC20.sol";
 import "./utils/Blacklist.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract EssentialToken is ERC20, Pausable,  BlackList {
     bool public isInitialized = false;
     bool public isPausable;
     bool public isBurnable;
     address public  owner;
+    address public factory;
 
     function initialize(
         address _owner,
+        address _factory,
         string memory _name,
         string memory _symbol,
         uint8 _decimals,
@@ -24,6 +26,7 @@ contract EssentialToken is ERC20, Pausable,  BlackList {
     ) external initializer {
         require(isInitialized == false, "Already Initialised" );
         owner = _owner;
+        factory = _factory;
         isInitialized = true;
         isBurnable = _isBurnable;
         isPausable = _isPausable;
@@ -38,6 +41,11 @@ contract EssentialToken is ERC20, Pausable,  BlackList {
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier onlyFactory() {
+        require(msg.sender == factory, "Not factory");
         _;
     }
 
@@ -63,7 +71,7 @@ contract EssentialToken is ERC20, Pausable,  BlackList {
         _unpause();
     }
 
-    function mint(address to, uint256 amount) public onlyOwner {
+    function mint(address to, uint256 amount) public onlyFactory {
         _mint(to, amount);
     }
 
@@ -86,7 +94,9 @@ contract EssentialToken is ERC20, Pausable,  BlackList {
         super.burn(amount);
     }
 
-    function burnFrom(address account, uint256 amount) public override  canBurn{
+    function burnFrom(address account, uint256 amount) public override canBurn {
+        // Allow both factory and account owner to burn
+        require(msg.sender == factory || msg.sender == account, "Not authorized to burn");
         super.burnFrom(account, amount);
     }
     
