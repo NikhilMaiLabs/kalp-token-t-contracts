@@ -88,6 +88,8 @@ const config: HardhatUserConfig = {
       url: getEnvVar("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
       accounts: getPrivateKeyArray("SEPOLIA_PRIVATE_KEY"),
       chainId: 11155111,
+      gas: 30000000, // 30M gas limit for large contract deployments
+      gasPrice: 20000000000, // 20 gwei gas price
     },
     
     // Polygon networks
@@ -104,6 +106,8 @@ const config: HardhatUserConfig = {
       url: getEnvVar("AMOY_RPC_URL", "https://rpc-amoy.polygon.technology"),
       accounts: getPrivateKeyArray("AMOY_PRIVATE_KEY"),
       chainId: 80002,
+      gas: 30000000, // 30M gas limit for large contract deployments
+      gasPrice: 30000000000, // 30 gwei gas price
     },
   },
 };

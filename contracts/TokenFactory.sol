@@ -57,7 +57,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
         /// @notice Whether the token has graduated to DEX trading
         bool hasGraduated;
         
-        /// @notice Address of the Uniswap V3 pool (only set after graduation)
+        /// @notice Address of the Uniswap V2 pair (only set after graduation)
         address dexPair;
     }
     
@@ -92,10 +92,10 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     /// @dev This fee goes to the factory owner for platform revenue
     uint256 public creationFee = 1 ether; // 1 POL on Polygon
     
-    /// @notice Address of the Uniswap V3 Position Manager contract
+    /// @notice Address of the Uniswap V2 Router contract
     /// @dev Used by all tokens for DEX integration during graduation
-    /// @dev Can be updated by owner in case of position manager upgrades
-    address public positionManager;
+    /// @dev Can be updated by owner in case of router upgrades
+    address public router;
     
     /// @notice Address that receives all platform fees and trading fees
     /// @dev All tokens created by this factory send fees to this address
@@ -318,7 +318,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @notice Initializes the TokenFactory with required addresses and configuration
      * @dev Sets up the factory with DEX integration and fee collection infrastructure
      * 
-     * @param _positionManager Address of the Uniswap V3 Position Manager for DEX integration
+     * @param _router Address of the Uniswap V2 Router for DEX integration
      * @param _platformFeeCollector Address that will receive all platform fees
      * @param _owner Address that will become the factory owner with admin privileges
      * 
@@ -329,13 +329,13 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * - Sets creation fee to 1 POL
 
      */
-    constructor(address _positionManager, address _platformFeeCollector, address _owner) Ownable(_owner) {
+    constructor(address _router, address _platformFeeCollector, address _owner) Ownable(_owner) {
         // Validate critical addresses
-        require(_positionManager != address(0), "Position manager cannot be zero address");
+        require(_router != address(0), "Router cannot be zero address");
         require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
         
         // Initialize DEX integration
-        positionManager = _positionManager;
+        router = _router;
         
         // Initialize fee collection
         platformFeeCollector = _platformFeeCollector;
@@ -408,7 +408,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
             graduationThreshold,    // Market cap for graduation
             msg.sender,             // Token creator (becomes owner)
             address(this),          // Factory address (gets admin permissions)
-            positionManager,        // Uniswap V3 Position Manager for DEX integration
+            router,                 // Uniswap V2 Router for DEX integration
             liquidityFee,          // Liquidity fee percentage
             creatorFee,            // Creator fee percentage
             platformFee,           // Platform fee percentage
@@ -640,18 +640,18 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @notice Updates the Uniswap V3 Position Manager used for token graduations
+     * @notice Updates the Uniswap V2 Router used for token graduations
      * @dev Affects all future token graduations but not existing graduated tokens
      * @dev Critical function as it determines DEX integration for new graduations
      * 
-     * @param newPositionManager Address of the new Uniswap V3 Position Manager contract
+     * @param newRouter Address of the new Uniswap V2 Router contract
      */
-    function updateRouter(address newPositionManager) external onlyOwner {
-        require(newPositionManager != address(0), "Position manager cannot be zero address");
-        address oldPositionManager = positionManager;
-        positionManager = newPositionManager;
+    function updateRouter(address newRouter) external onlyOwner {
+        require(newRouter != address(0), "Router cannot be zero address");
+        address oldRouter = router;
+        router = newRouter;
         
-        emit RouterUpdated(oldPositionManager, newPositionManager);
+        emit RouterUpdated(oldRouter, newRouter);
     }
     
     /**

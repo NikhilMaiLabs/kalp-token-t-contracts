@@ -1,35 +1,35 @@
 import hre from "hardhat";
 
-// Network configuration for Uniswap V3 Position Manager addresses
+// Network configuration for Uniswap V2 Router addresses
 const NETWORK_CONFIG = {
   // Polygon Mainnet
   137: {
     name: "Polygon Mainnet",
-    positionManager: "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
+    router: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff", // QuickSwap Router
     scanUrl: "https://polygonscan.com"
   },
-  // Polygon Mumbai Testnet  
+  // Polygon Amoy Testnet  
   80002: {
     name: "Polygon Amoy Testnet",
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88", // Not available
-    scanUrl: "https://mumbai.polygonscan.com"
+    router: "0x6f086D3a6430567d444aA55b9B37DF229Fb4677B", // QuickSwap Router Testnet
+    scanUrl: "https://amoy.polygonscan.com"
   },
   // Ethereum Mainnet
   1: {
     name: "Ethereum Mainnet", 
-    positionManager: "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+    router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D", // Uniswap V2 Router
     scanUrl: "https://etherscan.io"
   },
   // Sepolia Testnet
   11155111: {
     name: "Sepolia Testnet",
-    positionManager: "0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4",
+    router: "0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008", // Uniswap V2 Router Sepolia
     scanUrl: "https://sepolia.etherscan.io"
   },
   // Local hardhat network
   31337: {
     name: "Hardhat Local",
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    router: "0x8954AfA98594b838bda56FE4C12a09D7739D179b", // Mock router for testing
     scanUrl: "http://localhost:8545"
   }
 };
@@ -59,15 +59,15 @@ async function main() {
   
   // Check deployer balance
   const balance = await publicClient.getBalance({ address: walletClient.account.address });
-  console.log(`💰 Deployer balance: ${(Number(balance) / 1e18).toFixed(4)} ${chainId === 137 || chainId === 80001 ? 'MATIC' : 'ETH'}`);
-
+  console.log(`💰 Deployer balance: ${(Number(balance) / 1e18).toFixed(4)} ${chainId === 137 || chainId === 80002 ? 'MATIC' : 'ETH'}`);
+  
   // Configuration parameters
-  const positionManager = networkConfig.positionManager;
+  const router = networkConfig.router;
   const platformFeeCollector = walletClient.account.address;
   const owner = walletClient.account.address;
 
   console.log("\n📋 Deployment Configuration:");
-  console.log(`   Position Manager: ${positionManager}`);
+  console.log(`   Uniswap V2 Router: ${router}`);
   console.log(`   Platform Fee Collector: ${platformFeeCollector}`);
   console.log(`   Owner: ${owner}`);
 
@@ -75,11 +75,17 @@ async function main() {
   console.log("\n🏗️  Deploying TokenFactory...");
   
   try {
+    // For testnets, use higher gas limits to handle large contract deployments
+    const gasConfig = chainId === 80002 || chainId === 11155111 ? {
+      gas: 30000000n, // 30M gas limit
+      gasPrice: 30000000000n, // 30 gwei
+    } : {};
+
     const tokenFactory = await viem.deployContract("TokenFactory", [
-      positionManager as `0x${string}`,
+      router as `0x${string}`,
       platformFeeCollector as `0x${string}`, 
       owner as `0x${string}`
-    ]);
+    ], gasConfig);
 
     console.log(`✅ TokenFactory deployed to: ${tokenFactory.address}`);
     console.log(`🔍 View on explorer: ${networkConfig.scanUrl}/address/${tokenFactory.address}`);
@@ -88,12 +94,12 @@ async function main() {
     console.log("\n🔧 Verifying Factory Configuration:");
     
     const creationFee = await tokenFactory.read.creationFee();
-    const positionManagerAddr = await tokenFactory.read.positionManager();
+    const routerAddr = await tokenFactory.read.router();
     const platformFeeCollectorAddr = await tokenFactory.read.platformFeeCollector();
     const factoryOwner = await tokenFactory.read.owner();
     
-    console.log(`   ✓ Creation Fee: ${(Number(creationFee) / 1e18).toFixed(2)} ${chainId === 137 || chainId === 80001 ? 'MATIC' : 'ETH'}`);
-    console.log(`   ✓ Position Manager: ${positionManagerAddr}`);
+    console.log(`   ✓ Creation Fee: ${(Number(creationFee) / 1e18).toFixed(2)} ${chainId === 137 || chainId === 80002 ? 'MATIC' : 'ETH'}`);
+    console.log(`   ✓ Uniswap V2 Router: ${routerAddr}`);
     console.log(`   ✓ Platform Fee Collector: ${platformFeeCollectorAddr}`);
     console.log(`   ✓ Factory Owner: ${factoryOwner}`);
     
@@ -117,7 +123,7 @@ async function main() {
     console.log(`   ✓ Initial token count: ${tokenCount.toString()}`);
     
     const totalFeesCollected = await tokenFactory.read.totalFeesCollected();
-    console.log(`   ✓ Total fees collected: ${(Number(totalFeesCollected) / 1e18).toFixed(4)} ${chainId === 137 || chainId === 80001 ? 'MATIC' : 'ETH'}`);
+    console.log(`   ✓ Total fees collected: ${(Number(totalFeesCollected) / 1e18).toFixed(4)} ${chainId === 137 || chainId === 80002 ? 'MATIC' : 'ETH'}`);
     
     console.log("   ✅ All factory functions working correctly!");
 
@@ -140,7 +146,7 @@ async function main() {
       console.log("\n🛠️  Local Development Notes:");
       console.log("   - This is a local deployment for testing");
       console.log("   - Use mock tokens and test graduations");
-      console.log("   - Uniswap V3 may not be available locally");
+      console.log("   - Uniswap V2 router may be mock for local testing");
     }
     
     return {
@@ -148,7 +154,7 @@ async function main() {
       factory: tokenFactory,
       networkConfig,
       deploymentInfo: {
-        positionManager,
+        router,
         platformFeeCollector,
         owner,
         chainId
