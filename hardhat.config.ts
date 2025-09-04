@@ -98,12 +98,12 @@ const config: HardhatUserConfig = {
       accounts: getPrivateKeyArray("POLYGON_PRIVATE_KEY"),
       chainId: 137,
     },
-    mumbai: {
+    amoy: {
       type: "http",
       chainType: "l1",
-      url: getEnvVar("MUMBAI_RPC_URL", "https://rpc-mumbai.maticvigil.com"),
-      accounts: getPrivateKeyArray("MUMBAI_PRIVATE_KEY"),
-      chainId: 80001,
+      url: getEnvVar("AMOY_RPC_URL", "https://rpc-amoy.polygon.technology"),
+      accounts: getPrivateKeyArray("AMOY_PRIVATE_KEY"),
+      chainId: 80002,
     },
   },
 };
