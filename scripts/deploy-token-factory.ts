@@ -5,25 +5,25 @@ const NETWORK_CONFIG = {
   // Polygon Mainnet
   137: {
     name: "Polygon Mainnet",
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    positionManager: "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
     scanUrl: "https://polygonscan.com"
   },
   // Polygon Mumbai Testnet  
-  80001: {
-    name: "Polygon Mumbai Testnet",
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+  80002: {
+    name: "Polygon Amoy Testnet",
+    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88", // Not available
     scanUrl: "https://mumbai.polygonscan.com"
   },
   // Ethereum Mainnet
   1: {
     name: "Ethereum Mainnet", 
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    positionManager: "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
     scanUrl: "https://etherscan.io"
   },
   // Sepolia Testnet
   11155111: {
     name: "Sepolia Testnet",
-    positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
+    positionManager: "0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4",
     scanUrl: "https://sepolia.etherscan.io"
   },
   // Local hardhat network

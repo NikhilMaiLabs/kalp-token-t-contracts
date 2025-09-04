@@ -63,28 +63,6 @@ interface IWPOL {
  * - Users experience: Direct myToken/POL trading with native POL
  * - Uses concentrated liquidity with full range position (-887220 to 887220 ticks)
  * - After graduation, users trade myToken/POL as if it's a native pair
- * 
- * NATIVE POL INTEGRATION:
- * - Bonding curve: Users send/receive native POL directly
- * - Graduation: Automatically handles POL↔WPOL conversion for V3 compatibility
- * - Post-graduation: V3 pool appears as myToken/POL to users
- * - No manual wrapping required - contract handles all WPOL operations
- * 
- * FEE STRUCTURE:
- * - Trading fees: Applied on every buy/sell transaction (configurable)
- * - Graduation fees: Applied only upon graduation (liquidity/creator/platform split)
- * - All fees collected and distributed in native POL
- * 
- * SECURITY FEATURES:
- * - Blacklist functionality to block malicious addresses
- * - Pausable transfers for emergency situations
- * - Reentrancy protection on all critical functions
- * - Access control for administrative functions
- * 
- * ACCESS CONTROL:
- * - Owner (Creator): Can pause/unpause, manage blacklist
- * - Factory: Can update fees, trigger graduation, update fee collector
- * - Users: Can buy/sell tokens with native POL, view information
  */
 contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackList {
     
@@ -647,11 +625,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 6. Create full range V3 position for maximum liquidity coverage
      * 7. Distribute remaining fees to creator and platform in native POL
      * 
-     * User Experience:
-     * - Users see and trade myToken/POL pairs directly
-     * - No manual wrapping/unwrapping required
-     * - All DEX interactions feel like native POL trading
-     * - Contract handles technical WPOL requirements behind the scenes
      * 
      * Technical Implementation:
      * - V3 pool is technically TOKEN/WPOL (V3 requirement)
@@ -664,10 +637,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * - After graduation: 2X tokens total (X circulating + X in LP)
      * - This creates a 2:1 split where LP holds 50% of total supply
      * 
-     * Economic Impact:
-     * - Sets initial DEX price based on bonding curve final price
-     * - Creates immediate myToken/POL liquidity for trading
-     * - Uses concentrated liquidity for maximum capital efficiency
      */
     function _graduate() internal {
         // Mark token as graduated (no more bonding curve trading)
@@ -817,17 +786,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @param newBuyTradingFee New buy trading fee in basis points (max 1000 = 10%)
      * @param newSellTradingFee New sell trading fee in basis points (max 1000 = 10%)
      * 
-     * Requirements:
-     * - Caller must be the factory contract
-     * - Both fees must be <= 1000 basis points (10%)
-     * 
-     * Emits:
-     * - TradingFeesUpdated event with new fee values
-     * 
-     * Use Cases:
-     * - Adjust fees based on market conditions
-     * - Promotional periods with reduced fees
-     * - Anti-bot measures with temporary higher fees
      */
     function updateTradingFees(uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyFactory {
         require(newBuyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
@@ -844,13 +802,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @dev Emergency function to force graduation without reaching market cap threshold
      * @dev Should be used sparingly and only for valid reasons
      * 
-     * Requirements:
-     * - Caller must be the factory contract
-     * - Token must not be graduated yet
-     * 
-     * Emits:
-     * - GraduationTriggered event
-     * - LiquidityAdded event
      * 
      * Use Cases:
      * - Emergency situations requiring immediate graduation
@@ -917,11 +868,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @return graduated Whether the token has graduated to DEX
      * @return poolAddress V3 pool address (zero if not graduated)
      * 
-     * Usage:
-     * - Frontend dashboards
-     * - Portfolio tracking
-     * - Analytics platforms
-     * - Trading interfaces
      */
     function getTokenInfo() external view returns (
         uint256 currentPrice,
@@ -946,10 +892,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      * @return buyFee Current buy trading fee in basis points
      * @return sellFee Current sell trading fee in basis points
-     * 
-     * Example:
-     * - Returns (100, 200) means 1% buy fee and 2% sell fee
-     * - Returns (0, 0) means no trading fees
      */
     function getTradingFees() external view returns (uint256 buyFee, uint256 sellFee) {
         return (buyTradingFee, sellTradingFee);
