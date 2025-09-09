@@ -16,9 +16,7 @@
     "deploy:ethereum": "hardhat run scripts/deploy-token-factory.ts --network mainnet",
     "verify:polygon": "hardhat verify --network polygon",
     "verify:amoy": "hardhat verify --network amoy",
-    "verify:sepolia": "hardhat verify --network sepolia",
-    "interact:amoy": "hardhat run scripts/interact-contracts-viem.ts --network amoy",
-    "deploy-and-interact:amoy": "hardhat run scripts/deploy-and-interact-viem.ts --network amoy"
+    "verify:sepolia": "hardhat verify --network sepolia"
   },
   "keywords": [],
   "author": "",
