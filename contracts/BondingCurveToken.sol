@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "./utils/Blacklist.sol";
 
 interface IUniswapV2Factory {
@@ -49,6 +51,10 @@ interface IUniswapV2Router02 {
  * - Simpler and more gas-efficient than V3 concentrated liquidity
  */
 contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackList {
+    using Address for address payable;
+    
+    // Fixed-point scale (same as ERC20 decimals)
+    uint256 public constant WAD = 1e18;
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // BONDING CURVE PARAMETERS
@@ -177,6 +183,18 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @param sellFee New sell trading fee in basis points
     event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
     
+    /// @notice Emitted when the instantaneous price has changed due to supply update
+    event PriceUpdated(uint256 newPrice, uint256 newSupply);
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // ERRORS
+    // ═══════════════════════════════════════════════════════════════════════════════
+    
+    error ZeroAmount();
+    error InsufficientPayment(uint256 required, uint256 sent);
+    error SlippageExceeded(uint256 quoted, uint256 limit);
+    error ProceedsBelowMin(uint256 quoted, uint256 minOut);
+    
     // ═══════════════════════════════════════════════════════════════════════════════
     // MODIFIERS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -296,85 +314,81 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Gets the current price per token based on total supply
-     * @dev Uses linear bonding curve formula: price = basePrice + slope * totalSupply
+     * @dev Uses linear bonding curve formula: price = basePrice + slope * totalSupply / WAD
      * @dev This is the instantaneous price for the next token to be minted
      * 
      * @return currentPrice The current price per token in wei
      * 
      * Example:
-     * - basePrice = 1000 wei, slope = 100 wei, totalSupply = 50
-     * - currentPrice = 1000 + (100 * 50) = 6000 wei
+     * - basePrice = 1000 wei, slope = 100e18, totalSupply = 50e18
+     * - currentPrice = 1000 + (100e18 * 50e18) / 1e18 = 1000 + 100 * 50 = 6000 wei
      */
     function getCurrentPrice() public view returns (uint256 currentPrice) {
-        return basePrice + (slope * totalSupply());
+        uint256 s = totalSupply();
+        // Round down for display/consistency; buys round up cost separately
+        return basePrice + Math.mulDiv(slope, s, WAD, Math.Rounding.Floor);
     }
     
     /**
      * @notice Calculates the total cost to buy a specific amount of tokens
-     * @dev Uses integration to find the area under the linear curve
-     * @dev Formula: cost = basePrice * amount + slope * currentSupply * amount + slope * amount * (amount - 1) / 2
-     * @dev The last term accounts for the price increase during the batch purchase
+     * @dev Uses exact integral pricing with WAD math for precision
+     * @dev Formula: cost = (p0 * d)/WAD + slope * d * (2*s + d) / (2 * WAD^2), rounded up
      * 
-     * @param amount Number of tokens to buy (must be > 0)
+     * @param amount Number of tokens to buy (must be > 0), (18 decimals)
      * @return totalCost Total cost in wei (excluding trading fees)
-     * 
-     * Mathematical explanation:
-     * - For a linear curve, we integrate from currentSupply to currentSupply + amount
-     * - The integral of (basePrice + slope * x) dx from a to b is:
-     *   basePrice * (b - a) + slope * (b² - a²) / 2
-     * - This simplifies to the formula used below
-     * 
-     * Example:
-     * - Buying 10 tokens when supply = 100, basePrice = 1000, slope = 50
-     * - cost = 1000*10 + 50*100*10 + 50*10*9/2 = 10000 + 50000 + 2250 = 62250 wei
      */
     function getBuyPrice(uint256 amount) public view returns (uint256 totalCost) {
-        require(amount > 0, "Amount must be greater than 0");
-        
-        uint256 currentSupply = totalSupply();
-        
-        // Calculate the area under the linear bonding curve
-        // This represents the total cost for buying 'amount' tokens
-        totalCost = basePrice * amount + 
-                      slope * currentSupply * amount + 
-                      slope * amount * (amount - 1) / 2;
-        
-        return totalCost;
+        if (amount == 0) return 0;
+        return _buyCost(totalSupply(), amount);
     }
     
     /**
      * @notice Calculates the total refund for selling a specific amount of tokens
-     * @dev Uses integration to find the area under the linear curve (in reverse)
-     * @dev The refund is calculated from the new supply level up to current supply
+     * @dev Uses exact integral pricing with WAD math for precision
+     * @dev Formula: proceeds = (p0 * d)/WAD + slope * d * (2*s - d) / (2 * WAD^2), rounded down
      * 
      * @param amount Number of tokens to sell (must be > 0 and <= totalSupply)
      * @return totalRefund Total refund in wei (before trading fees)
-     * 
-     * Mathematical explanation:
-     * - When selling, we calculate the area from (currentSupply - amount) to currentSupply
-     * - This uses the same integration formula as buying, but from the lower range
-     * - newSupply = currentSupply - amount
-     * - refund = integral from newSupply to currentSupply
-     * 
-     * Example:
-     * - Selling 5 tokens when supply = 105, basePrice = 1000, slope = 50
-     * - newSupply = 100, so we integrate from 100 to 105
-     * - refund = 1000*5 + 50*100*5 + 50*5*4/2 = 5000 + 25000 + 500 = 30500 wei
      */
     function getSellPrice(uint256 amount) public view returns (uint256 totalRefund) {
-        require(amount > 0, "Amount must be greater than 0");
+        if (amount == 0) return 0;
         require(amount <= totalSupply(), "Cannot sell more than total supply");
+        return _sellProceeds(totalSupply(), amount);
+    }
+    
+    // ========= Internal math =========
+    
+    /// @dev Price at supply `s` with rounding down
+    function _priceAtSupply(uint256 s) internal view returns (uint256) {
+        return basePrice + Math.mulDiv(slope, s, WAD, Math.Rounding.Floor);
+    }
+    
+    /// @dev Cost to buy `d` when current supply is `s`
+    /// cost = (p0 * d)/WAD + slope * d * (2*s + d) / (2 * WAD^2), rounded up
+    function _buyCost(uint256 s, uint256 d) internal view returns (uint256) {
+        // term1 = (p0 * d)/WAD
+        uint256 term1 = Math.mulDiv(basePrice, d, WAD, Math.Rounding.Ceil);
         
-        uint256 currentSupply = totalSupply();
-        uint256 newSupply = currentSupply - amount;
+        // term2 = slope * d * (2*s + d) / (2 * WAD^2)
+        uint256 sdOverWad = Math.mulDiv(slope, d, WAD, Math.Rounding.Ceil); // slope * d / WAD
+        uint256 twoSPlusD = s * 2 + d; // safe with checked math (reverts on overflow)
+        uint256 term2 = Math.mulDiv(sdOverWad, twoSPlusD, 2 * WAD, Math.Rounding.Ceil);
         
-        // Calculate the area under the curve from newSupply to currentSupply
-        // This represents the refund for selling 'amount' tokens
-        totalRefund = basePrice * amount + 
-                        slope * newSupply * amount + 
-                        slope * amount * (amount - 1) / 2;
+        return term1 + term2;
+    }
+    
+    /// @dev Proceeds from selling `d` when current supply is `s`
+    /// proceeds = (p0 * d)/WAD + slope * d * (2*s - d) / (2 * WAD^2), rounded down
+    function _sellProceeds(uint256 s, uint256 d) internal view returns (uint256) {
+        // term1 = (p0 * d)/WAD
+        uint256 term1 = Math.mulDiv(basePrice, d, WAD, Math.Rounding.Floor);
         
-        return totalRefund;
+        // term2 = slope * d * (2*s - d) / (2 * WAD^2)
+        uint256 sdOverWad = Math.mulDiv(slope, d, WAD, Math.Rounding.Floor); // slope * d / WAD
+        uint256 twoSMinusD = s * 2 - d; // requires d <= 2*s; always true if d <= s
+        uint256 term2 = Math.mulDiv(sdOverWad, twoSMinusD, 2 * WAD, Math.Rounding.Floor);
+        
+        return term1 + term2;
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -431,19 +445,11 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     // ═══════════════════════════════════════════════════════════════════════════════
     
     /**
-     * @notice Buy tokens using POL through the bonding curve
+     * @notice Buy exactly `amount` tokens
      * @dev This function handles the complete buy process including trading fees
      * @dev Only available before graduation - after graduation, use DEX
      * 
-     * Process:
-     * 1. Calculate bonding curve cost
-     * 2. Calculate and collect trading fee
-     * 3. Mint tokens to buyer
-     * 4. Update totalRaised (excluding trading fee)
-     * 5. Refund any excess POL
-     * 6. Check if graduation threshold is reached
-     * 
-     * @param amount Number of tokens to buy (must be > 0)
+     * @param amount Token amount (18 decimals)
      * 
      * Requirements:
      * - Token must not be graduated yet
@@ -453,19 +459,14 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      * Emits:
      * - TokensPurchased event with purchase details
+     * - PriceUpdated event with new price and supply
      * - Potentially GraduationTriggered if threshold is reached
-     * 
-     * Example:
-     * - Buying 10 tokens with cost = 62250 wei, tradingFee = 1% = 622 wei
-     * - Total required = 62250 + 622 = 62872 wei
-     * - totalRaised increases by 62250 wei (bonding curve portion only)
-     * - Trading fee goes directly to platform fee collector
      */
     function buyTokens(uint256 amount) external payable nonReentrant whenNotPaused notGraduated {
-        require(amount > 0, "Amount must be greater than 0");
+        if (amount == 0) revert ZeroAmount();
         
-        // Calculate bonding curve cost (base cost without trading fee)
-        uint256 cost = getBuyPrice(amount);
+        uint256 s = totalSupply();
+        uint256 cost = _buyCost(s, amount); // rounds up
         
         // Calculate trading fee on the base cost
         uint256 tradingFee = (cost * buyTradingFee) / 10000;
@@ -473,8 +474,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Total cost including trading fee
         uint256 totalCost = cost + tradingFee;
         
-        // Ensure user sent enough POL
-        require(msg.value >= totalCost, "Insufficient POL sent");
+        // Ensure user sent enough POL for total cost
+        if (msg.value < totalCost) revert InsufficientPayment(totalCost, msg.value);
         
         // Mint tokens to the buyer
         _mint(msg.sender, amount);
@@ -488,31 +489,25 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             payable(platformFeeCollector).transfer(tradingFee);
         }
         
-        // Refund any excess POL sent by the user
-        if (msg.value > totalCost) {
-            payable(msg.sender).transfer(msg.value - totalCost);
-        }
+        // Emit events for tracking
+        emit TokensPurchased(msg.sender, amount, cost, s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
         
-        // Emit event for tracking (cost excludes trading fee)
-        emit TokensPurchased(msg.sender, amount, cost, totalSupply());
+        // Refund any excess POL sent by the user
+        uint256 refund = msg.value - totalCost;
+        if (refund > 0) payable(msg.sender).sendValue(refund);
         
         // Check if the purchase triggers graduation to DEX
         _checkGraduation();
     }
     
     /**
-     * @notice Sell tokens back to the bonding curve for POL
+     * @notice Sell exactly `amount` tokens, reverting if proceeds fall below `minProceeds`
      * @dev This function handles the complete sell process including trading fees
      * @dev Only available before graduation - after graduation, use DEX
      * 
-     * Process:
-     * 1. Calculate bonding curve refund
-     * 2. Calculate and collect trading fee from refund
-     * 3. Burn tokens from seller
-     * 4. Update totalRaised (decrease by full refund amount)
-     * 5. Transfer net refund to seller (refund - trading fee)
-     * 
-     * @param amount Number of tokens to sell (must be > 0 and <= user balance)
+     * @param amount Token amount (18 decimals)
+     * @param minProceeds Minimum acceptable POL proceeds to protect against slippage
      * 
      * Requirements:
      * - Token must not be graduated yet
@@ -523,46 +518,43 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      * Emits:
      * - TokensSold event with sale details
-     * 
-     * Example:
-     * - Selling 10 tokens with refund = 30500 wei, sellTradingFee = 2% = 610 wei
-     * - Net refund to seller = 30500 - 610 = 29890 wei
-     * - totalRaised decreases by 30500 wei (full refund amount)
-     * - Trading fee goes to platform fee collector
+     * - PriceUpdated event with new price and supply
      */
-    function sellTokens(uint256 amount) external nonReentrant whenNotPaused notGraduated {
-        require(amount > 0, "Amount must be greater than 0");
+    function sellTokens(uint256 amount, uint256 minProceeds) external nonReentrant whenNotPaused notGraduated {
+        if (amount == 0) revert ZeroAmount();
         require(balanceOf(msg.sender) >= amount, "Insufficient token balance");
         
-        // Calculate bonding curve refund (base refund without trading fee)
-        uint256 refund = getSellPrice(amount);
+        uint256 s = totalSupply();
+        uint256 proceeds = _sellProceeds(s, amount); // rounds down
+        if (proceeds < minProceeds) revert ProceedsBelowMin(proceeds, minProceeds);
         
-        // Calculate trading fee on the refund amount
-        uint256 tradingFee = (refund * sellTradingFee) / 10000;
+        // Calculate trading fee on the proceeds amount
+        uint256 tradingFee = (proceeds * sellTradingFee) / 10000;
         
-        // Net refund to seller after trading fee deduction
-        uint256 netRefund = refund - tradingFee;
+        // Net proceeds to seller after trading fee deduction
+        uint256 netProceeds = proceeds - tradingFee;
         
-        // Ensure contract has enough POL for the full refund
-        require(address(this).balance >= refund, "Insufficient contract balance");
+        // Ensure contract has enough POL for the full proceeds
+        require(address(this).balance >= proceeds, "Insufficient contract balance");
         
         // Burn tokens from the seller (reduces total supply)
         _burn(msg.sender, amount);
         
-        // Update totalRaised by the full refund amount
+        // Update totalRaised by the full proceeds amount
         // (This maintains bonding curve integrity)
-        totalRaised -= refund;
+        totalRaised -= proceeds;
         
         // Transfer trading fee to platform fee collector
         if (tradingFee > 0) {
             payable(platformFeeCollector).transfer(tradingFee);
         }
         
-        // Transfer net refund to the seller
-        payable(msg.sender).transfer(netRefund);
+        // Emit events for tracking
+        emit TokensSold(msg.sender, amount, proceeds, s - amount);
+        emit PriceUpdated(_priceAtSupply(s - amount), s - amount);
         
-        // Emit event for tracking (refund excludes trading fee)
-        emit TokensSold(msg.sender, amount, refund, totalSupply());
+        // Transfer net proceeds to the seller
+        payable(msg.sender).sendValue(netProceeds);
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -915,16 +907,13 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Receives POL sent directly to the contract
-     * @dev Allows the contract to accept POL for liquidity and fee operations
-     * @dev POL can be sent for various reasons:
-     *   - Direct donations
-     *   - Refunds from failed DEX operations
-     *   - Gas stipend refunds
-     * 
-     * Note: This does NOT trigger token purchases
-     * Use buyTokens() function to purchase tokens with POL
+     * @dev Prevents accidental POL sends; require using buyTokens()
+     * @dev Only allows POL for specific operations like liquidity provision
      */
-    receive() external payable {}
+    receive() external payable {
+        // Prevent accidental POL sends; require using buyTokens()
+        revert("Direct POL not accepted");
+    }
     
     /**
      * @notice Fallback function for handling unexpected calls
