@@ -407,7 +407,15 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * - marketCap = 1000 * 5000 = 5,000,000 wei
      */
     function getMarketCap() public view returns (uint256 marketCap) {
-        return totalSupply() * getCurrentPrice();
+        uint256 supply = totalSupply();
+        uint256 price = getCurrentPrice();
+        
+        // Check for overflow before multiplication
+        if (supply > 0 && price > type(uint256).max / supply) {
+            revert("Market cap calculation would overflow");
+        }
+        
+        return supply * price;
     }
     
     /**
@@ -582,11 +590,11 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @dev Once called, the token can never return to bonding curve trading
      * 
      * Graduation Process (Native POL UX):
-     * 1. Mark token as graduated (disables buy/sell functions)
-     * 2. Create myToken/POL trading pair on Uniswap V2
-     * 3. Mint additional tokens equal to current supply for liquidity
-     * 4. Calculate liquidity amounts (LIQUIDITY_FEE % of totalRaised)
-     * 5. Add liquidity to V2 pair using addLiquidityETH
+     * 1. Calculate amounts and create pair first
+     * 2. Mint additional tokens equal to current supply for liquidity
+     * 3. Calculate liquidity amounts (LIQUIDITY_FEE % of totalRaised)
+     * 4. Try to add liquidity to V2 pair using addLiquidityETH
+     * 5. Only mark as graduated if Uniswap operations succeed
      * 6. Distribute remaining fees to creator and platform in native POL
      * 
      * Technical Implementation:
@@ -602,9 +610,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      */
     function _graduate() internal {
-        // Mark token as graduated (no more bonding curve trading)
-        hasGraduated = true;
-        
         // Calculate amounts for liquidity provision
         uint256 currentSupply = totalSupply();
         
@@ -615,9 +620,9 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
         
         // Create or get the myToken/POL pair on Uniswap V2
-        dexPool = uniswapV2Factory.getPair(address(this), router.WETH());
-        if (dexPool == address(0)) {
-            dexPool = uniswapV2Factory.createPair(address(this), router.WETH());
+        address pair = uniswapV2Factory.getPair(address(this), router.WETH());
+        if (pair == address(0)) {
+            pair = uniswapV2Factory.createPair(address(this), router.WETH());
         }
         
         // Mint additional tokens for the liquidity pool
@@ -626,26 +631,42 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Approve router to spend our tokens
         _approve(address(this), address(router), liquidityTokenAmount);
         
-        // Add liquidity to V2 pair (token + ETH)
-        // V2 addLiquidityETH is much simpler than V3 mint
-        (uint amountToken, uint amountETH, uint liquidity) = router.addLiquidityETH{value: liquidityPolAmount}(
+        // Calculate dynamic slippage protection (5% max slippage)
+        uint256 maxSlippage = 500; // 5% in basis points
+        uint256 tokenMin = liquidityTokenAmount * (10000 - maxSlippage) / 10000;
+        uint256 ethMin = liquidityPolAmount * (10000 - maxSlippage) / 10000;
+        
+        // Set deadline with validation
+        uint256 deadline = block.timestamp + 300; // 5 minutes
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        
+        // Try Uniswap operation with proper error handling and dynamic slippage
+        try router.addLiquidityETH{value: liquidityPolAmount}(
             address(this),                    // token
             liquidityTokenAmount,             // amountTokenDesired
-            liquidityTokenAmount * 95 / 100,  // amountTokenMin (5% slippage)
-            liquidityPolAmount * 95 / 100,    // amountETHMin (5% slippage)
+            tokenMin,                         // amountTokenMin (dynamic slippage)
+            ethMin,                           // amountETHMin (dynamic slippage)
             address(this),                    // to (this contract receives LP tokens)
-            block.timestamp + 300             // deadline (5 minutes)
-        );
-        
-        // Store the amount of liquidity tokens we received
-        liquidityTokensAmount = liquidity;
-        
-        // Distribute remaining fees to creator and platform
-        _distributeFees();
-        
-        // Emit events for tracking the successful myToken/POL pair creation
-        emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokensAmount);
-        emit LiquidityAdded(amountToken, amountETH, liquidity);
+            deadline                          // deadline (5 minutes)
+        ) returns (uint amountToken, uint amountETH, uint liquidity) {
+            // Only mark as graduated if Uniswap operations succeed
+            hasGraduated = true;
+            dexPool = pair;
+            
+            // Store the amount of liquidity tokens we received
+            liquidityTokensAmount = liquidity;
+            
+            // Distribute remaining fees to creator and platform
+            _distributeFees();
+            
+            // Emit events for tracking the successful myToken/POL pair creation
+            emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokensAmount);
+            emit LiquidityAdded(amountToken, amountETH, liquidity);
+        } catch {
+            // Revert state changes if Uniswap operation fails
+            _burn(address(this), liquidityTokenAmount);
+            revert("Graduation failed: Uniswap operation unsuccessful");
+        }
     }
     
     /**
