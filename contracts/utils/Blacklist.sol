@@ -26,6 +26,7 @@ abstract contract BlackList {
      * @param _account The address to be blocked
      */
     function _blockAccount (address _account) internal virtual {
+        require(_account != address(0), "Cannot block zero address");
         require(!_isBlackListed[_account], "Blacklist: Account is already blocked");
         _isBlackListed[_account] = true;
 
