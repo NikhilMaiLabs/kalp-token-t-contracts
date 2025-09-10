@@ -397,25 +397,23 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Calculates the current market cap of the token
-     * @dev Market cap = totalSupply * getCurrentPrice()
+     * @dev Market cap = (price * supply) / WAD where price is in WAD format
      * @dev This determines when the token is ready for graduation
+     * @dev Uses Math.mulDiv for precise calculation and overflow protection
      * 
      * @return marketCap Current market cap in wei
      * 
      * Example:
-     * - totalSupply = 1000 tokens, currentPrice = 5000 wei
-     * - marketCap = 1000 * 5000 = 5,000,000 wei
+     * - totalSupply = 1000 tokens, currentPrice = 5000e18 (WAD format)
+     * - marketCap = (5000e18 * 1000) / 1e18 = 5,000,000 wei
      */
     function getMarketCap() public view returns (uint256 marketCap) {
         uint256 supply = totalSupply();
         uint256 price = getCurrentPrice();
         
-        // Check for overflow before multiplication
-        if (supply > 0 && price > type(uint256).max / supply) {
-            revert("Market cap calculation would overflow");
-        }
-        
-        return supply * price;
+        // Use Math.mulDiv to properly handle WAD scaling
+        // price is in WAD format, so we need to divide by WAD to get actual market cap
+        return Math.mulDiv(price, supply, WAD, Math.Rounding.Ceil);
     }
     
     /**
