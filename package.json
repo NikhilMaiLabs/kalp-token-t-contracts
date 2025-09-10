@@ -18,7 +18,9 @@
     "verify:amoy": "hardhat verify --network amoy",
     "verify:sepolia": "hardhat verify --network sepolia",
     "interact:amoy": "hardhat run scripts/interact-contracts-viem.ts --network amoy",
-    "deploy-and-interact:amoy": "hardhat run scripts/deploy-and-interact-viem.ts --network amoy"
+    "deploy-and-interact:amoy": "hardhat run scripts/deploy-and-interact-viem.ts --network amoy",
+    "deploy-and-interact:local": "hardhat run scripts/deploy-and-interact-local.ts --network localhost",
+    "quick-test:local": "hardhat run scripts/quick-test-local.ts --network localhost"
   },
   "keywords": [],
   "author": "",
