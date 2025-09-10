@@ -1,0 +1,10 @@
+{
+  "network": "amoy",
+  "tokenFactory": "0xf0d21cc0f2a9c4fb0f9fc68a9df4b2becb52afd9",
+  "v2Factory": "0x242BD3e422a946b5D2EB83C8c9A9B5c6499EEcFa",
+  "router2": "0x6f086D3a6430567d444aA55b9B37DF229Fb4677B",
+  "platformFeeCollector": "0xb91b06369b605182AA3d9100B589Ca1ADa502c53",
+  "factoryOwner": "0xb91b06369b605182AA3d9100B589Ca1ADa502c53",
+  "deployedAt": "2025-09-08T08:20:41.769Z",
+  "deployer": "0xb91b06369b605182aa3d9100b589ca1ada502c53"
+}
