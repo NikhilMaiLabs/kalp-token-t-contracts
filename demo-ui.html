@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bonding Curve Token Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            padding: 30px;
+        }
+
+        .panel {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid #e9ecef;
+        }
+
+        .panel h2 {
+            color: #495057;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #51cf66 0%, #40c057 100%);
+        }
+
+        .price-display {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+
+        .price-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #f1f3f4;
+        }
+
+        .price-item:last-child {
+            border-bottom: none;
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: #667eea;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .chart {
+            width: 100%;
+            height: 300px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .chart-line {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .chart-points {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        .chart-point {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Bonding Curve Token Demo</h1>
+            <p>Interactive simulation of linear bonding curve pricing with WAD math</p>
+        </div>
+
+        <div class="main-content">
+            <!-- Trading Panel -->
+            <div class="panel">
+                <h2>💱 Trading Interface</h2>
+                
+                <div class="form-group">
+                    <label for="tokenAmount">Token Amount (tokens)</label>
+                    <input type="number" id="tokenAmount" value="1" step="0.000001" placeholder="Enter amount in tokens">
+                </div>
+
+                <div class="form-group">
+                    <label for="actionType">Action</label>
+                    <select id="actionType">
+                        <option value="buy">Buy Tokens</option>
+                        <option value="sell">Sell Tokens</option>
+                        <option value="quote">Quote Only</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="maxCost">Max Cost (for buy) / Min Proceeds (for sell) in ETH</label>
+                    <input type="number" id="maxCost" value="0" step="0.000001" placeholder="Enter max cost or min proceeds in ETH">
+                </div>
+
+                <button class="btn" onclick="executeTrade()">Execute Trade</button>
+                <button class="btn btn-danger" onclick="resetSimulation()">Reset Simulation</button>
+            </div>
+
+            <!-- Price Display Panel -->
+            <div class="panel">
+                <h2>💰 Price Information</h2>
+                
+                <div class="price-display">
+                    <div class="price-item">
+                        <span>Current Price (ETH per token):</span>
+                        <span id="currentPrice">0.001</span>
+                    </div>
+                    <div class="price-item">
+                        <span>Base Price (ETH):</span>
+                        <span id="basePrice">0.001</span>
+                    </div>
+                    <div class="price-item">
+                        <span>Slope (ETH per token):</span>
+                        <span id="slope">0.001</span>
+                    </div>
+                    <div class="price-item">
+                        <span>Total Supply (tokens):</span>
+                        <span id="totalSupply">0</span>
+                    </div>
+                    <div class="price-item">
+                        <span>Market Cap (ETH):</span>
+                        <span id="marketCap">0</span>
+                    </div>
+                </div>
+
+                <div id="tradeResult"></div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="userBalance">0</div>
+                        <div class="stat-label">Your Token Balance</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="userEth">1000</div>
+                        <div class="stat-label">Your ETH Balance</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Price Chart -->
+        <div class="chart-container">
+            <h2>📈 Price Curve Visualization</h2>
+            <div class="chart" id="priceChart">
+                <div class="chart-line"></div>
+                <div class="chart-points" id="chartPoints"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Bonding Curve Parameters (WAD scaled)
+        const WAD = 1e18;
+        const BASE_PRICE = 1e15; // 0.001 wei starting price
+        const SLOPE = 1e15; // 0.001 wei per token increase
+        const GRADUATION_THRESHOLD = 1e50; // Very high threshold
+
+        // Simulation state
+        let totalSupply = 0;
+        let userBalance = 0;
+        let userEth = 1000 * WAD; // 1000 ETH in wei
+        let tradeHistory = [];
+
+        // Initialize the demo
+        function init() {
+            updatePriceDisplay();
+            updateChart();
+            updateUserStats();
+        }
+
+        // Calculate current price using WAD math
+        function getCurrentPrice() {
+            // Current price = basePrice + (slope * totalSupply) / WAD
+            // Since BASE_PRICE and SLOPE are already WAD-scaled, we need to divide by WAD
+            return BASE_PRICE + Math.floor((SLOPE * totalSupply) / WAD);
+        }
+
+        // Calculate buy cost using exact integral formula
+        function calculateBuyCost(amount) {
+            if (amount === 0) return 0;
+            
+            const s = totalSupply;
+            const d = amount;
+            
+            // term1 = basePrice * d / WAD
+            const term1 = Math.floor((BASE_PRICE * d) / WAD);
+            
+            // sdOverWad = slope * d / WAD
+            const sdOverWad = Math.floor((SLOPE * d) / WAD);
+            
+            // twoSPlusD = s * 2 + d
+            const twoSPlusD = s * 2 + d;
+            
+            // term2 = sdOverWad * twoSPlusD / (2 * WAD)
+            const term2 = Math.floor((sdOverWad * twoSPlusD) / (2 * WAD));
+            
+            return term1 + term2;
+        }
+
+        // Calculate sell proceeds using exact integral formula
+        function calculateSellProceeds(amount) {
+            if (amount === 0) return 0;
+            
+            const s = totalSupply;
+            const d = amount;
+            
+            // term1 = basePrice * d / WAD
+            const term1 = Math.floor((BASE_PRICE * d) / WAD);
+            
+            // sdOverWad = slope * d / WAD
+            const sdOverWad = Math.floor((SLOPE * d) / WAD);
+            
+            // twoSMinusD = s * 2 - d
+            const twoSMinusD = s * 2 - d;
+            
+            // term2 = sdOverWad * twoSMinusD / (2 * WAD)
+            const term2 = Math.floor((sdOverWad * twoSMinusD) / (2 * WAD));
+            
+            return term1 + term2;
+        }
+
+        // Execute a trade
+        function executeTrade() {
+            const tokenAmount = parseFloat(document.getElementById('tokenAmount').value);
+            const amount = Math.floor(tokenAmount * 1e18); // Convert tokens to wei
+            const actionType = document.getElementById('actionType').value;
+            const ethAmount = parseFloat(document.getElementById('maxCost').value) || 0;
+            const maxCost = Math.floor(ethAmount * 1e18); // Convert ETH to wei
+
+            if (amount <= 0) {
+                showStatus('error', 'Amount must be greater than 0');
+                return;
+            }
+
+            let cost, proceeds, success = false;
+            let message = '';
+
+            if (actionType === 'buy' || actionType === 'quote') {
+                cost = calculateBuyCost(amount);
+                
+                if (actionType === 'buy') {
+                    if (userEth < cost) {
+                        showStatus('error', `Insufficient ETH. Required: ${formatEth(cost)} ETH, Available: ${formatEth(userEth)} ETH`);
+                        return;
+                    }
+                    
+                    if (maxCost > 0 && cost > maxCost) {
+                        showStatus('error', `Slippage exceeded. Cost: ${formatEth(cost)} ETH, Max: ${formatEth(maxCost)} ETH`);
+                        return;
+                    }
+                    
+                    userEth -= cost;
+                    userBalance += amount;
+                    totalSupply += amount;
+                    success = true;
+                    message = `Successfully bought ${formatTokens(amount)} tokens for ${formatEth(cost)} ETH`;
+                } else {
+                    message = `Quote: ${formatTokens(amount)} tokens would cost ${formatEth(cost)} ETH`;
+                }
+            } else if (actionType === 'sell') {
+                if (userBalance < amount) {
+                    showStatus('error', `Insufficient tokens. Required: ${formatTokens(amount)}, Available: ${formatTokens(userBalance)}`);
+                    return;
+                }
+                
+                proceeds = calculateSellProceeds(amount);
+                
+                if (maxCost > 0 && proceeds < maxCost) {
+                    showStatus('error', `Proceeds below minimum. Proceeds: ${formatEth(proceeds)} ETH, Min: ${formatEth(maxCost)} ETH`);
+                    return;
+                }
+                
+                userEth += proceeds;
+                userBalance -= amount;
+                totalSupply -= amount;
+                success = true;
+                message = `Successfully sold ${formatTokens(amount)} tokens for ${formatEth(proceeds)} ETH`;
+            }
+
+            if (success) {
+                tradeHistory.push({
+                    type: actionType,
+                    amount: amount,
+                    cost: cost || 0,
+                    proceeds: proceeds || 0,
+                    timestamp: Date.now()
+                });
+            }
+
+            showStatus(success ? 'success' : 'info', message);
+            updatePriceDisplay();
+            updateChart();
+            updateUserStats();
+        }
+
+        // Update price display
+        function updatePriceDisplay() {
+            const currentPrice = getCurrentPrice();
+            // Market cap = current price * total supply (both in wei)
+            // The result is in wei, so we convert to ETH by dividing by WAD
+            const marketCap = Math.floor((currentPrice * totalSupply) / WAD);
+
+            // Debug logging
+            console.log('Debug - totalSupply:', totalSupply);
+            console.log('Debug - currentPrice:', currentPrice);
+            console.log('Debug - marketCap (wei):', currentPrice * totalSupply);
+            console.log('Debug - marketCap (ETH):', marketCap);
+
+            document.getElementById('currentPrice').textContent = formatEth(currentPrice);
+            document.getElementById('basePrice').textContent = formatEth(BASE_PRICE);
+            document.getElementById('slope').textContent = formatEth(SLOPE);
+            document.getElementById('totalSupply').textContent = formatTokens(totalSupply);
+            document.getElementById('marketCap').textContent = formatEth(marketCap);
+        }
+
+        // Update user statistics
+        function updateUserStats() {
+            document.getElementById('userBalance').textContent = formatTokens(userBalance);
+            document.getElementById('userEth').textContent = formatEth(userEth);
+        }
+
+        // Update price chart
+        function updateChart() {
+            const chartPoints = document.getElementById('chartPoints');
+            chartPoints.innerHTML = '';
+
+            // Generate points for the price curve
+            const maxSupply = Math.max(totalSupply * 2, 1000 * WAD);
+            const step = maxSupply / 20;
+            
+            for (let i = 0; i <= 20; i++) {
+                const supply = i * step;
+                const price = BASE_PRICE + (SLOPE * supply) / WAD;
+                
+                const point = document.createElement('div');
+                point.className = 'chart-point';
+                point.style.left = `${(i / 20) * 100}%`;
+                point.style.bottom = `${(price / (BASE_PRICE + (SLOPE * maxSupply) / WAD)) * 100}%`;
+                chartPoints.appendChild(point);
+            }
+        }
+
+        // Show status message
+        function showStatus(type, message) {
+            const resultDiv = document.getElementById('tradeResult');
+            resultDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        // Reset simulation
+        function resetSimulation() {
+            totalSupply = 0;
+            userBalance = 0;
+            userEth = 1000 * WAD;
+            tradeHistory = [];
+            document.getElementById('tokenAmount').value = '1';
+            document.getElementById('actionType').value = 'buy';
+            document.getElementById('maxCost').value = '0';
+            updatePriceDisplay();
+            updateChart();
+            updateUserStats();
+            document.getElementById('tradeResult').innerHTML = '';
+        }
+
+        // Format wei to ETH
+        function formatEth(wei) {
+            if (wei === 0) return '0';
+            return (wei / 1e18).toFixed(6);
+        }
+
+        // Format wei to tokens (for display)
+        function formatTokens(wei) {
+            if (wei === 0) return '0';
+            return (wei / 1e18).toFixed(6);
+        }
+
+        // Format wei to readable format (for input fields)
+        function formatWei(wei) {
+            if (wei === 0) return '0';
+            if (wei < 1e15) return wei.toString();
+            if (wei < 1e18) return (wei / 1e15).toFixed(3) + 'K';
+            if (wei < 1e21) return (wei / 1e18).toFixed(3) + 'M';
+            return (wei / 1e18).toFixed(3) + 'B';
+        }
+
+        // Initialize on page load
+        window.onload = init;
+    </script>
+</body>
+</html>
