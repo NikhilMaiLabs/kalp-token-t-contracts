@@ -368,7 +368,75 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     ) public payable nonReentrant validParameters(name, symbol, slope, basePrice, graduationThreshold) returns (address tokenAddress) {
         return _createTokenInternal(name, symbol, slope, basePrice, graduationThreshold);
     }
+
+    /**
+     * @notice Creates a new bonding curve token and immediately allows creator to buy tokens
+     * @dev Combines token creation with immediate token purchase for creator convenience
+     * @dev Total payment must cover both creation fee and token purchase cost
+     *
+     * @param name Human-readable name for the token
+     * @param symbol Short identifier for the token
+     * @param slope Price increase per token in wei
+     * @param basePrice Starting price for the first token in wei
+     * @param graduationThreshold Custom market cap threshold for DEX graduation in wei
+     * @param tokenAmount Amount of tokens to buy after creation
+     * @return tokenAddress Address of the newly deployed token contract
+     *
+     */
+    function createTokenWithDevBuy(
+        string memory name,
+        string memory symbol,
+        uint256 slope,
+        uint256 basePrice,
+        uint256 graduationThreshold,
+        uint256 tokenAmount
+    ) external payable nonReentrant validParameters(name, symbol, slope, basePrice, graduationThreshold) returns (address tokenAddress) {
+
+        // Calculate the cost for buying tokens (using the same formula as BondingCurveToken)
+        uint256 tokenBuyCost = _calculateBuyCost(0, tokenAmount, slope, basePrice);
+        uint256 totalRequired = creationFee + tokenBuyCost;
+
+        require(msg.value >= totalRequired, "Insufficient payment for creation fee and token purchase");
+
+        // Create the token first
+        tokenAddress = _createTokenInternal(name, symbol, slope, basePrice, graduationThreshold);
+
+        // Now buy tokens on behalf of the creator
+        BondingCurveToken tokenContract = BondingCurveToken(payable(tokenAddress));
+        tokenContract.buyTokens{value: tokenBuyCost}(tokenAmount);
+
+        // Refund any excess payment
+        uint256 excess = msg.value - totalRequired;
+        if (excess > 0) {
+            payable(msg.sender).transfer(excess);
+        }
+
+        return tokenAddress;
+    }
     
+    /**
+     * @notice Internal function to calculate the cost of buying tokens on a bonding curve
+     * @dev Replicates the cost calculation logic from BondingCurveToken
+     * @param s Current supply of tokens
+     * @param d Amount of tokens to buy
+     * @param slope Bonding curve slope parameter
+     * @param basePrice Initial token price
+     * @return cost Total cost in wei to buy d tokens
+     */
+    function _calculateBuyCost(uint256 s, uint256 d, uint256 slope, uint256 basePrice) public pure returns (uint256 cost) {
+        // Using the same constants as BondingCurveToken
+        uint256 WAD = 10**18;
+
+        uint256 term1 = Math.mulDiv(basePrice, d, WAD, Math.Rounding.Ceil);
+        
+        // term2 = slope * d * (2*s + d) / (2 * WAD^2)
+        uint256 sdOverWad = Math.mulDiv(slope, d, WAD, Math.Rounding.Ceil); // slope * d / WAD
+        uint256 twoSPlusD = s * 2 + d; // safe with checked math (reverts on overflow)
+        uint256 term2 = Math.mulDiv(sdOverWad, twoSPlusD, 2 * WAD, Math.Rounding.Ceil);
+        
+        return term1 + term2;
+    }
+
     /**
      * @notice Internal function that handles the actual token deployment and setup
      * @dev Called by both public creation functions after validation
