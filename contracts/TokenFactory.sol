@@ -394,7 +394,8 @@ contract TokenFactory is Ownable, ReentrancyGuard {
 
         // Calculate the cost for buying tokens (using the same formula as BondingCurveToken)
         uint256 tokenBuyCost = _calculateBuyCost(0, tokenAmount, slope, basePrice);
-        uint256 totalRequired = creationFee + tokenBuyCost;
+        uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000; 
+        uint256 totalRequired = creationFee + tokenBuyCost + tradingFee;
 
         require(msg.value >= totalRequired, "Insufficient payment for creation fee and token purchase");
 
@@ -403,7 +404,7 @@ contract TokenFactory is Ownable, ReentrancyGuard {
 
         // Now buy tokens on behalf of the creator
         BondingCurveToken tokenContract = BondingCurveToken(payable(tokenAddress));
-        tokenContract.buyTokens{value: tokenBuyCost}(tokenAmount);
+        tokenContract.buyTokensFor{value: tokenBuyCost + tradingFee}(msg.sender, tokenAmount);
 
         // Refund any excess payment
         uint256 excess = msg.value - totalRequired;

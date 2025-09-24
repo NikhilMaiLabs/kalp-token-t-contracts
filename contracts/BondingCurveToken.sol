@@ -506,7 +506,68 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Check if the purchase triggers graduation to DEX
         _checkGraduation();
     }
-    
+
+    /**
+     * @notice Buy tokens on behalf of another address (factory only)
+     * @dev This function allows the factory to purchase tokens during token creation
+     * @dev Only callable by the factory contract
+     *
+     * @param recipient Address that will receive the tokens
+     * @param amount Token amount to purchase (18 decimals)
+     *
+     * Requirements:
+     * - Only callable by factory
+     * - Token must not be graduated
+     * - Amount must be greater than 0
+     * - Must send enough POL to cover cost + trading fees
+     *
+     * Effects:
+     * - Mints tokens to recipient address
+     * - Updates totalRaised by bonding curve cost
+     * - Transfers trading fees to platform fee collector
+     * - Refunds excess POL to caller (factory)
+     * - May trigger graduation if market cap reached
+     */
+    function buyTokensFor(address recipient, uint256 amount) external payable onlyFactory nonReentrant whenNotPaused notGraduated {
+        if (amount == 0) revert ZeroAmount();
+        if (recipient == address(0)) revert("Invalid recipient address");
+
+        uint256 s = totalSupply();
+        uint256 cost = _buyCost(s, amount); // rounds up
+
+        // Calculate trading fee on the base cost
+        uint256 tradingFee = (cost * buyTradingFee) / 10000;
+
+        // Total cost including trading fee
+        uint256 totalCost = cost + tradingFee;
+
+        // Ensure factory sent enough POL for total cost
+        if (msg.value < totalCost) revert InsufficientPayment(totalCost, msg.value);
+
+        // Mint tokens to the specified recipient
+        _mint(recipient, amount);
+
+        // Update totalRaised with only the bonding curve cost
+        // (Trading fees don't count towards graduation calculations)
+        totalRaised += cost;
+
+        // Transfer trading fee directly to platform fee collector
+        if (tradingFee > 0) {
+            payable(platformFeeCollector).transfer(tradingFee);
+        }
+
+        // Emit events for tracking (show recipient as the buyer)
+        emit TokensPurchased(recipient, amount, cost, s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
+
+        // Refund any excess POL sent by the factory
+        uint256 refund = msg.value - totalCost;
+        if (refund > 0) payable(msg.sender).sendValue(refund);
+
+        // Check if the purchase triggers graduation to DEX
+        _checkGraduation();
+    }
+
     /**
      * @notice Sell exactly `amount` tokens, reverting if proceeds fall below `minProceeds`
      * @dev This function handles the complete sell process including trading fees
