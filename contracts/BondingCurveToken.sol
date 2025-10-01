@@ -686,8 +686,16 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      *
      */
     function _graduate() internal {
+        // CRITICAL: Mark as graduated FIRST to prevent any reentrancy
+        // This must happen before ANY external calls (including createPair)
+        hasGraduated = true;
+
         // Calculate amounts for liquidity provision
         uint256 currentSupply = totalSupply();
+
+        // Validate minimum liquidity requirements
+        if (currentSupply == 0) revert InvalidParameter("zero supply");
+        if (totalRaised == 0) revert InvalidParameter("zero raised");
 
         // Mint equal amount of tokens for liquidity (doubles total supply)
         uint256 liquidityTokenAmount = currentSupply;
@@ -712,9 +720,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 tokenMin = liquidityTokenAmount * (10000 - maxSlippage) / 10000;
         uint256 ethMin = liquidityPolAmount * (10000 - maxSlippage) / 10000;
 
-        // Set deadline with validation
+        // Set deadline (no validation needed - always valid)
         uint256 deadline = block.timestamp + 300; // 5 minutes
-        if (deadline <= block.timestamp) revert InvalidDeadline();
 
         // Try Uniswap operation with proper error handling and dynamic slippage
         try router.addLiquidityETH{value: liquidityPolAmount}(
@@ -725,11 +732,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             address(this),                    // to (this contract receives LP tokens)
             deadline                          // deadline (5 minutes)
         ) returns (uint amountToken, uint amountETH, uint liquidity) {
-            // CRITICAL: Mark as graduated BEFORE external calls to prevent reentrancy
-            hasGraduated = true;
+            // Store graduation data
             dexPool = pair;
-
-            // Store the amount of liquidity tokens we received
             liquidityTokensAmount = liquidity;
 
             // Emit events for tracking the successful myToken/POL pair creation
@@ -740,10 +744,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             _distributeFees();
         } catch Error(string memory reason) {
             // Revert state changes if Uniswap operation fails
+            hasGraduated = false; // Reset graduation status
             _burn(address(this), liquidityTokenAmount);
             revert GraduationFailed(reason);
         } catch {
             // Revert state changes if Uniswap operation fails with no reason
+            hasGraduated = false; // Reset graduation status
             _burn(address(this), liquidityTokenAmount);
             revert GraduationFailed("Uniswap operation unsuccessful");
         }
