@@ -169,11 +169,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     /// @dev Used for revenue tracking and owner withdrawals
     uint256 public totalFeesCollected;
     
-    /// @notice Total trading volume across all tokens
-    /// @dev Currently not actively updated by token contracts
-    /// @dev Reserved for future analytics implementation
-    uint256 public totalVolume;
-    
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -418,10 +413,12 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         uint256 graduationThreshold,
         uint256 tokenAmount
     ) external payable nonReentrant validParameters(name, symbol, slope, basePrice, graduationThreshold) returns (address tokenAddress) {
+        // Validate token amount
+        require(tokenAmount > 0, "Token amount must be greater than 0");
 
         // Calculate the cost for buying tokens (using the same formula as BondingCurveToken)
         uint256 tokenBuyCost = calculateBuyCost(0, tokenAmount, slope, basePrice);
-        uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000; 
+        uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000;
         uint256 totalRequired = creationFee + tokenBuyCost + tradingFee;
 
         require(msg.value >= totalRequired, "Insufficient payment for creation fee and token purchase");
