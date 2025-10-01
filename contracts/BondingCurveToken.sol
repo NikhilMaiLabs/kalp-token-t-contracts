@@ -189,11 +189,22 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
     // ═══════════════════════════════════════════════════════════════════════════════
-    
+
     error ZeroAmount();
     error InsufficientPayment(uint256 required, uint256 sent);
     error SlippageExceeded(uint256 quoted, uint256 limit);
     error ProceedsBelowMin(uint256 quoted, uint256 minOut);
+    error InvalidRecipient();
+    error InsufficientTokenBalance(uint256 balance, uint256 required);
+    error InsufficientContractBalance(uint256 balance, uint256 required);
+    error TokenAlreadyGraduated();
+    error TokenNotGraduated();
+    error InvalidAddress();
+    error InvalidParameter(string param);
+    error OnlyFactory();
+    error BlacklistedAccount(address account);
+    error GraduationFailed(string reason);
+    error InvalidDeadline();
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // MODIFIERS
@@ -202,21 +213,21 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @notice Restricts access to factory contract only
     /// @dev Used for administrative functions like fee updates and graduation
     modifier onlyFactory() {
-        require(msg.sender == factory, "Only factory can call this function");
+        if (msg.sender != factory) revert OnlyFactory();
         _;
     }
-    
+
     /// @notice Restricts access to functions that should only work before graduation
     /// @dev Used for buy/sell functions that become unavailable after DEX listing
     modifier notGraduated() {
-        require(!hasGraduated, "Token has already graduated");
+        if (hasGraduated) revert TokenAlreadyGraduated();
         _;
     }
-    
+
     /// @notice Restricts access to functions that should only work after graduation
     /// @dev Currently not used but available for future features
     modifier onlyGraduated() {
-        require(hasGraduated, "Token has not graduated yet");
+        if (!hasGraduated) revert TokenNotGraduated();
         _;
     }
     
@@ -266,20 +277,20 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 _sellTradingFee
     ) ERC20(name, symbol) Ownable(_creator) {
         // Validate bonding curve parameters
-        require(_slope > 0, "Slope must be greater than 0");
-        require(_basePrice > 0, "Base price must be greater than 0");
-        require(_graduationThreshold > 0, "Graduation threshold must be greater than 0");
-        
+        if (_slope == 0) revert InvalidParameter("slope");
+        if (_basePrice == 0) revert InvalidParameter("basePrice");
+        if (_graduationThreshold == 0) revert InvalidParameter("graduationThreshold");
+
         // Validate addresses
-        require(_creator != address(0), "Creator cannot be zero address");
-        require(_factory != address(0), "Factory cannot be zero address");
-        require(_router != address(0), "Router cannot be zero address");
-        require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
-        
+        if (_creator == address(0)) revert InvalidAddress();
+        if (_factory == address(0)) revert InvalidAddress();
+        if (_router == address(0)) revert InvalidAddress();
+        if (_platformFeeCollector == address(0)) revert InvalidAddress();
+
         // Validate fee structures
-        require(_liquidityFee + _creatorFee + _platformFee == 10000, "Fees must sum to 10000 (100%)");
-        require(_buyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
-        require(_sellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
+        if (_liquidityFee + _creatorFee + _platformFee != 10000) revert InvalidParameter("fee distribution");
+        if (_buyTradingFee > 1000) revert InvalidParameter("buyTradingFee");
+        if (_sellTradingFee > 1000) revert InvalidParameter("sellTradingFee");
         
         // Initialize bonding curve parameters
         slope = _slope;
@@ -352,7 +363,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function getSellPrice(uint256 amount) public view returns (uint256 totalRefund) {
         if (amount == 0) return 0;
-        require(amount <= totalSupply(), "Cannot sell more than total supply");
+        if (amount > totalSupply()) revert InvalidParameter("amount exceeds supply");
         return _sellProceeds(totalSupply(), amount);
     }
     
@@ -530,7 +541,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function buyTokensFor(address recipient, uint256 amount) external payable onlyFactory nonReentrant whenNotPaused notGraduated {
         if (amount == 0) revert ZeroAmount();
-        if (recipient == address(0)) revert("Invalid recipient address");
+        if (recipient == address(0)) revert InvalidRecipient();
 
         uint256 s = totalSupply();
         uint256 cost = _buyCost(s, amount); // rounds up
@@ -589,20 +600,22 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function sellTokens(uint256 amount, uint256 minProceeds) external nonReentrant whenNotPaused notGraduated {
         if (amount == 0) revert ZeroAmount();
-        require(balanceOf(msg.sender) >= amount, "Insufficient token balance");
-        
+        uint256 balance = balanceOf(msg.sender);
+        if (balance < amount) revert InsufficientTokenBalance(balance, amount);
+
         uint256 s = totalSupply();
         uint256 proceeds = _sellProceeds(s, amount); // rounds down
         if (proceeds < minProceeds) revert ProceedsBelowMin(proceeds, minProceeds);
-        
+
         // Calculate trading fee on the proceeds amount
         uint256 tradingFee = (proceeds * sellTradingFee) / 10000;
-        
+
         // Net proceeds to seller after trading fee deduction
         uint256 netProceeds = proceeds - tradingFee;
-        
+
         // Ensure contract has enough POL for the full proceeds
-        require(address(this).balance >= proceeds, "Insufficient contract balance");
+        uint256 contractBalance = address(this).balance;
+        if (contractBalance < proceeds) revert InsufficientContractBalance(contractBalance, proceeds);
         
         // Burn tokens from the seller (reduces total supply)
         _burn(msg.sender, amount);
@@ -701,7 +714,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
 
         // Set deadline with validation
         uint256 deadline = block.timestamp + 300; // 5 minutes
-        require(deadline > block.timestamp, "Deadline must be in the future");
+        if (deadline <= block.timestamp) revert InvalidDeadline();
 
         // Try Uniswap operation with proper error handling and dynamic slippage
         try router.addLiquidityETH{value: liquidityPolAmount}(
@@ -725,10 +738,14 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
 
             // Distribute remaining fees to creator and platform (AFTER state changes)
             _distributeFees();
-        } catch {
+        } catch Error(string memory reason) {
             // Revert state changes if Uniswap operation fails
             _burn(address(this), liquidityTokenAmount);
-            revert("Graduation failed: Uniswap operation unsuccessful");
+            revert GraduationFailed(reason);
+        } catch {
+            // Revert state changes if Uniswap operation fails with no reason
+            _burn(address(this), liquidityTokenAmount);
+            revert GraduationFailed("Uniswap operation unsuccessful");
         }
     }
     
@@ -777,20 +794,23 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Updates the platform fee collector address
      * @dev Only callable by the factory contract
      * @dev This address receives all trading fees and platform graduation fees
-     * 
+     *
      * @param newPlatformFeeCollector The new platform fee collector address
-     * 
+     *
      * Requirements:
      * - Caller must be the factory contract
      * - New address cannot be zero address
-     * 
+     * - New address must be able to receive POL (validated by factory)
+     *
      * Use Cases:
      * - Factory owner wants to change fee collection address
      * - Upgrade to a new fee management contract
      * - Change from EOA to multisig for better security
+     *
+     * Security: Factory validates the address can receive POL before calling this function
      */
     function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyFactory {
-        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+        if (newPlatformFeeCollector == address(0)) revert InvalidAddress();
         platformFeeCollector = newPlatformFeeCollector;
     }
     
@@ -804,12 +824,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      */
     function updateTradingFees(uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyFactory {
-        require(newBuyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
-        require(newSellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
-        
+        if (newBuyTradingFee > 1000) revert InvalidParameter("buyTradingFee");
+        if (newSellTradingFee > 1000) revert InvalidParameter("sellTradingFee");
+
         buyTradingFee = newBuyTradingFee;
         sellTradingFee = newSellTradingFee;
-        
+
         emit TradingFeesUpdated(newBuyTradingFee, newSellTradingFee);
     }
     
@@ -980,10 +1000,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function _update(address from, address to, uint256 amount) internal override whenNotPaused {
         // Check if recipient is blacklisted (applies to all transfers including mints)
-        require(!isAccountBlocked(to), "BlackList: Recipient account is blocked");
-        
+        if (isAccountBlocked(to)) revert BlacklistedAccount(to);
+
         // Check if sender is blacklisted (applies to transfers and burns, but not mints)
-        require(!isAccountBlocked(from), "BlackList: Sender account is blocked");
+        if (isAccountBlocked(from)) revert BlacklistedAccount(from);
 
         // Call parent implementation to handle the actual transfer
         super._update(from, to, amount);
@@ -996,7 +1016,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     receive() external payable {
         // Prevent accidental POL sends; require using buyTokens()
-        revert("Direct POL not accepted");
+        revert InvalidParameter("use buyTokens()");
     }
     
     /**

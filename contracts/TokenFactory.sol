@@ -12,13 +12,37 @@ import "./BondingCurveToken.sol";
  * @author Kalp Team
  * @notice Factory contract for deploying and managing bonding curve tokens
  * @dev This contract serves as the central hub for the bonding curve token ecosystem
- * 
+ *
  * CORE FUNCTIONALITY:
  * - Deploy new bonding curve tokens with customizable parameters
  * - Manage fee structures and platform settings globally
  * - Track all tokens created through the factory
  * - Provide administrative functions for token management
  * - Handle creation fees and revenue collection
+ *
+ * SECURITY CONSIDERATIONS:
+ * ⚠️ CENTRALIZATION RISKS:
+ * - This contract uses UUPS upgradeable pattern controlled by a single owner
+ * - Owner can upgrade contract logic, update fees, and trigger graduations
+ * - Platform fee collector can be changed by owner
+ *
+ * RECOMMENDATIONS FOR PRODUCTION:
+ * 1. Transfer ownership to a multi-signature wallet (e.g., Gnosis Safe with 3-of-5)
+ * 2. Implement a timelock contract (e.g., 48-hour delay) for critical operations:
+ *    - Contract upgrades
+ *    - Fee structure changes
+ *    - Router updates
+ * 3. Consider adding governance mechanism for major decisions
+ * 4. Implement emergency pause functionality with strict access controls
+ * 5. Use OpenZeppelin's TimelockController for upgrade authorization
+ *
+ * EXAMPLE SETUP:
+ * ```
+ * // 1. Deploy Gnosis Safe multisig with team members
+ * // 2. Deploy TimelockController with 48-hour minimum delay
+ * // 3. Transfer factory ownership to TimelockController
+ * // 4. Set TimelockController admin to Gnosis Safe
+ * ```
  */
 contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
     
@@ -676,14 +700,23 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @notice Updates the platform fee collector address for future tokens
      * @dev Only affects tokens created after this change
      * @dev Does NOT update existing tokens - use updatePlatformFeeCollectorOnExistingToken for those
-     * 
+     *
      * @param newPlatformFeeCollector New address to receive platform fees
+     *
+     * Security: Validates that the new address can receive POL by sending 0 wei test transaction
+     * This prevents setting a contract that reverts on receive, which would brick fee collection
      */
     function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyOwner {
         require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+
+        // Test that the new collector can receive POL
+        // This prevents setting a contract that would revert and brick the system
+        (bool success, ) = payable(newPlatformFeeCollector).call{value: 0}("");
+        require(success, "Platform fee collector must be able to receive POL");
+
         address oldCollector = platformFeeCollector;
         platformFeeCollector = newPlatformFeeCollector;
-        
+
         emit PlatformFeeCollectorUpdated(oldCollector, newPlatformFeeCollector);
     }
 
@@ -691,11 +724,19 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @notice Updates platform fee collector for a specific existing token
      * @dev Allows updating fee collection for tokens already deployed
      * @dev Only callable by factory owner with admin permissions on tokens
-     * 
+     *
      * @param token Address of the token to update
      * @param newPlatformFeeCollector New fee collector address for this token
+     *
+     * Security: Validates that the new address can receive POL before updating
      */
     function updatePlatformFeeCollectorOnExistingToken(address token, address newPlatformFeeCollector) external onlyOwner validTokenAddress(token) {
+        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+
+        // Test that the new collector can receive POL
+        (bool success, ) = payable(newPlatformFeeCollector).call{value: 0}("");
+        require(success, "Platform fee collector must be able to receive POL");
+
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
         tokenContract.updatePlatformFeeCollector(newPlatformFeeCollector);
     }
