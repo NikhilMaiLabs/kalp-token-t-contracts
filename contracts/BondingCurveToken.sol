@@ -193,7 +193,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @param newSupply The new total supply after the transaction
     /// @param timestamp Block timestamp when price changed
     event PriceUpdated(uint256 indexed newPrice, uint256 newSupply, uint256 timestamp);
-    
+
+    /// @notice Emitted when dust POL is withdrawn after graduation
+    /// @param owner Address that withdrew the dust
+    /// @param amount Amount of POL withdrawn
+    event DustWithdrawn(address indexed owner, uint256 amount);
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -890,7 +895,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Unpauses token transfers and trading
      * @dev Only callable by the token owner (creator)
      * @dev Restores normal token functionality
-     * 
+     *
      * Effects:
      * - Re-enables buyTokens() and sellTokens()
      * - Re-enables all token transfers
@@ -899,7 +904,39 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     function unpause() external onlyOwner {
         _unpause();
     }
-    
+
+    /**
+     * @notice Withdraws any leftover POL (dust) from the contract after graduation
+     * @dev Only callable by the token owner (creator) after graduation
+     * @dev This function recovers POL left from slippage savings during liquidity provision
+     *
+     * Requirements:
+     * - Only callable by owner
+     * - Token must have graduated
+     * - Contract must have POL balance > 0
+     *
+     * Use Cases:
+     * - Recover POL leftover from addLiquidityETH slippage
+     * - Collect accumulated rounding dust
+     * - Clean up contract balance after graduation
+     *
+     * Security:
+     * - Cannot be called before graduation (bonding curve POL is locked)
+     * - Uses safe transfer method via sendValue()
+     * - Emits event for transparency
+     *
+     * Emits:
+     * - DustWithdrawn event with amount withdrawn
+     */
+    function withdrawDust() external onlyOwner onlyGraduated nonReentrant {
+        uint256 balance = address(this).balance;
+        if (balance == 0) revert ZeroAmount();
+
+        payable(owner()).sendValue(balance);
+
+        emit DustWithdrawn(owner(), balance);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // INFORMATION GETTER FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════════
