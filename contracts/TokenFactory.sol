@@ -5,6 +5,7 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "./BondingCurveToken.sol";
 
 /**
@@ -45,7 +46,8 @@ import "./BondingCurveToken.sol";
  * ```
  */
 contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
-    
+    using Address for address payable;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // DATA STRUCTURES
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -447,7 +449,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
 
         // Refund excess BEFORE external call to token contract (CEI pattern)
         if (excess > 0) {
-            payable(msg.sender).transfer(excess);
+            payable(msg.sender).sendValue(excess);
         }
 
         // Now buy tokens on behalf of the creator (external call comes last)
@@ -571,8 +573,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
 
         // Refund any excess ETH payment to user (using safe transfer)
         if (excessRefund > 0) {
-            (bool success, ) = payable(msg.sender).call{value: excessRefund}("");
-            require(success, "Refund transfer failed");
+            payable(msg.sender).sendValue(excessRefund);
         }
 
         return tokenAddress;
@@ -795,7 +796,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         uint256 balance = address(this).balance;
         require(balance > 0, "No fees to withdraw");
         
-        payable(owner()).transfer(balance);
+        payable(owner()).sendValue(balance);
         
         emit FeesWithdrawn(owner(), balance);
     }

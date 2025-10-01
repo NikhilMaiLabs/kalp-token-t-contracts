@@ -511,7 +511,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Transfer trading fee directly to platform fee collector
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            payable(platformFeeCollector).sendValue(tradingFee);
         }
         
         // Emit events for tracking
@@ -572,7 +572,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
 
         // Transfer trading fee directly to platform fee collector
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            payable(platformFeeCollector).sendValue(tradingFee);
         }
 
         // Emit events for tracking (show recipient as the buyer)
@@ -634,7 +634,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Transfer trading fee to platform fee collector
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            payable(platformFeeCollector).sendValue(tradingFee);
         }
         
         // Emit events for tracking
@@ -787,12 +787,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     function _distributeFees(uint256 expectedCreatorFee, uint256 expectedPlatformFee) internal {
         // Distribute creator fee based on pre-calculated amount
         if (expectedCreatorFee > 0) {
-            payable(creator).transfer(expectedCreatorFee);
+            payable(creator).sendValue(expectedCreatorFee);
         }
 
         // Distribute platform fee based on pre-calculated amount
         if (expectedPlatformFee > 0) {
-            payable(platformFeeCollector).transfer(expectedPlatformFee);
+            payable(platformFeeCollector).sendValue(expectedPlatformFee);
         }
 
         // Note: Any remaining POL (from slippage savings or rounding) stays in the contract
