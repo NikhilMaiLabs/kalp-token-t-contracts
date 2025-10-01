@@ -55,6 +55,11 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     // Fixed-point scale (same as ERC20 decimals)
     uint256 public constant WAD = 1e18;
+
+    // Graduation constants
+    uint256 private constant MAX_SLIPPAGE_BPS = 500; // 5% maximum slippage for liquidity provision
+    uint256 private constant BASIS_POINTS = 10000; // 100% in basis points
+    uint256 private constant LIQUIDITY_DEADLINE = 300; // 5 minutes in seconds
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // BONDING CURVE PARAMETERS
@@ -703,8 +708,11 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Mint equal amount of tokens for liquidity (doubles total supply)
         uint256 liquidityTokenAmount = currentSupply;
 
-        // Calculate POL for liquidity (typically 80% of totalRaised)
-        uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
+        // Calculate POL amounts BEFORE minting (based on totalRaised percentages)
+        // This ensures fee distribution is based on expected amounts, not leftover balance
+        uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / BASIS_POINTS;
+        uint256 expectedCreatorFee = (totalRaised * CREATOR_FEE) / BASIS_POINTS;
+        uint256 expectedPlatformFee = (totalRaised * PLATFORM_FEE) / BASIS_POINTS;
 
         // Create or get the myToken/POL pair on Uniswap V2
         address pair = uniswapV2Factory.getPair(address(this), router.WETH());
@@ -718,13 +726,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Approve router to spend our tokens
         _approve(address(this), address(router), liquidityTokenAmount);
 
-        // Calculate dynamic slippage protection (5% max slippage)
-        uint256 maxSlippage = 500; // 5% in basis points
-        uint256 tokenMin = liquidityTokenAmount * (10000 - maxSlippage) / 10000;
-        uint256 ethMin = liquidityPolAmount * (10000 - maxSlippage) / 10000;
+        // Calculate dynamic slippage protection using constant
+        uint256 tokenMin = liquidityTokenAmount * (BASIS_POINTS - MAX_SLIPPAGE_BPS) / BASIS_POINTS;
+        uint256 ethMin = liquidityPolAmount * (BASIS_POINTS - MAX_SLIPPAGE_BPS) / BASIS_POINTS;
 
-        // Set deadline (no validation needed - always valid)
-        uint256 deadline = block.timestamp + 300; // 5 minutes
+        // Set deadline (always valid as it's based on current block timestamp)
+        uint256 deadline = block.timestamp + LIQUIDITY_DEADLINE;
 
         // Try Uniswap operation with proper error handling and dynamic slippage
         try router.addLiquidityETH{value: liquidityPolAmount}(
@@ -733,7 +740,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             tokenMin,                         // amountTokenMin (dynamic slippage)
             ethMin,                           // amountETHMin (dynamic slippage)
             address(this),                    // to (this contract receives LP tokens)
-            deadline                          // deadline (5 minutes)
+            deadline                          // deadline (based on constant)
         ) returns (uint amountToken, uint amountETH, uint liquidity) {
             // Store graduation data
             dexPool = pair;
@@ -743,8 +750,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokensAmount);
             emit LiquidityAdded(amountToken, amountETH, liquidity);
 
-            // Distribute remaining fees to creator and platform (AFTER state changes)
-            _distributeFees();
+            // Distribute fees using pre-calculated expected amounts (not remaining balance)
+            _distributeFees(expectedCreatorFee, expectedPlatformFee);
         } catch Error(string memory reason) {
             // Revert state changes if Uniswap operation fails
             hasGraduated = false; // Reset graduation status
@@ -760,39 +767,36 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Internal function to distribute graduation fees
-     * @dev Called during graduation to distribute remaining POL after liquidity provision
-     * @dev Only distributes POL that remains after liquidity has been added
-     * 
+     * @dev Called during graduation to distribute fees based on totalRaised percentages
+     * @dev Uses pre-calculated expected amounts rather than remaining balance
+     *
      * Fee Distribution:
-     * 1. Calculate remaining POL balance after liquidity provision
-     * 2. Distribute creator fee (typically 0%)
-     * 3. Distribute platform fee (typically 20%)
-     * 4. Any remaining POL stays in contract (should be minimal due to fee structure)
-     * 
+     * 1. Distribute creator fee based on totalRaised percentage (typically 0%)
+     * 2. Distribute platform fee based on totalRaised percentage (typically 20%)
+     * 3. Any remaining POL stays in contract (from slippage savings or rounding)
+     *
+     * @param expectedCreatorFee Pre-calculated creator fee based on totalRaised
+     * @param expectedPlatformFee Pre-calculated platform fee based on totalRaised
+     *
      * Example with totalRaised = 100 POL:
      * - Liquidity gets 80 POL (LIQUIDITY_FEE = 8000 basis points)
-     * - After liquidity, remaining = ~20 POL
      * - Creator gets 0 POL (CREATOR_FEE = 0 basis points)
      * - Platform gets 20 POL (PLATFORM_FEE = 2000 basis points)
+     * - Any leftover from slippage stays in contract
      */
-    function _distributeFees() internal {
-        // Get remaining POL balance after liquidity provision
-        uint256 remainingPol = address(this).balance;
-        
-        // Calculate and distribute creator fee
-        uint256 creatorFee = (remainingPol * CREATOR_FEE) / 10000;
-        if (creatorFee > 0) {
-            payable(creator).transfer(creatorFee);
+    function _distributeFees(uint256 expectedCreatorFee, uint256 expectedPlatformFee) internal {
+        // Distribute creator fee based on pre-calculated amount
+        if (expectedCreatorFee > 0) {
+            payable(creator).transfer(expectedCreatorFee);
         }
-        
-        // Calculate and distribute platform fee
-        uint256 platformFee = (remainingPol * PLATFORM_FEE) / 10000;
-        if (platformFee > 0) {
-            payable(platformFeeCollector).transfer(platformFee);
+
+        // Distribute platform fee based on pre-calculated amount
+        if (expectedPlatformFee > 0) {
+            payable(platformFeeCollector).transfer(expectedPlatformFee);
         }
-        
-        // Note: Any remaining POL (due to rounding) stays in the contract
-        // This should be minimal due to the fee structure design
+
+        // Note: Any remaining POL (from slippage savings or rounding) stays in the contract
+        // This protects against slippage affecting fee distribution amounts
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -1020,11 +1024,20 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Receives POL sent directly to the contract
-     * @dev Prevents accidental POL sends; require using buyTokens()
-     * @dev Only allows POL for specific operations like liquidity provision
+     * @dev Allows POL from router (for refunds during liquidity provision)
+     * @dev Prevents accidental POL sends from users; they should use buyTokens()
+     *
+     * Security Note:
+     * - Allows receives from router address (needed for addLiquidityETH refunds)
+     * - Allows receives during graduation process
+     * - Reverts for direct user sends to prevent accidents
      */
     receive() external payable {
-        // Prevent accidental POL sends; require using buyTokens()
+        // Allow POL from router (for refunds during liquidity operations)
+        if (msg.sender == address(router)) {
+            return;
+        }
+        // Prevent accidental POL sends from users; they should use buyTokens()
         revert InvalidParameter("use buyTokens()");
     }
     

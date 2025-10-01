@@ -168,6 +168,19 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     /// @dev Incremented each time a token is successfully created
     /// @dev Used for revenue tracking and owner withdrawals
     uint256 public totalFeesCollected;
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // CONSTANTS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Maximum allowed slope to prevent overflow issues
+    uint256 public constant MAX_SLOPE = 1e36; // 1e18 tokens * 1e18 price
+
+    /// @notice Maximum allowed base price to prevent overflow issues
+    uint256 public constant MAX_BASE_PRICE = 1e27; // 1 billion ETH in wei
+
+    /// @notice Maximum allowed graduation threshold to prevent overflow issues
+    uint256 public constant MAX_GRADUATION_THRESHOLD = 1e30; // 1 trillion ETH in wei
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
@@ -305,8 +318,11 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         require(bytes(name).length > 0, "Name cannot be empty");
         require(bytes(symbol).length > 0, "Symbol cannot be empty");
         require(slope > 0, "Slope must be greater than 0");
+        require(slope <= MAX_SLOPE, "Slope exceeds maximum");
         require(basePrice > 0, "Base price must be greater than 0");
+        require(basePrice <= MAX_BASE_PRICE, "Base price exceeds maximum");
         require(graduationThreshold > 0, "Graduation threshold must be greater than 0");
+        require(graduationThreshold <= MAX_GRADUATION_THRESHOLD, "Graduation threshold exceeds maximum");
         _;
     }
 
@@ -423,18 +439,20 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
 
         require(msg.value >= totalRequired, "Insufficient payment for creation fee and token purchase");
 
-        // Create the token first
+        // Calculate and store excess before any external calls (CEI pattern)
+        uint256 excess = msg.value - totalRequired;
+
+        // Create the token first (uses internal creation fee, doesn't touch excess)
         tokenAddress = _createTokenInternal(name, symbol, slope, basePrice, graduationThreshold);
 
-        // Now buy tokens on behalf of the creator
-        BondingCurveToken tokenContract = BondingCurveToken(payable(tokenAddress));
-        tokenContract.buyTokensFor{value: tokenBuyCost + tradingFee}(msg.sender, tokenAmount);
-
-        // Refund any excess payment
-        uint256 excess = msg.value - totalRequired;
+        // Refund excess BEFORE external call to token contract (CEI pattern)
         if (excess > 0) {
             payable(msg.sender).transfer(excess);
         }
+
+        // Now buy tokens on behalf of the creator (external call comes last)
+        BondingCurveToken tokenContract = BondingCurveToken(payable(tokenAddress));
+        tokenContract.buyTokensFor{value: tokenBuyCost + tradingFee}(msg.sender, tokenAmount);
 
         return tokenAddress;
     }
@@ -491,7 +509,13 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     ) internal returns (address tokenAddress) {
         // Ensure sufficient payment for creation fee
         require(msg.value >= creationFee, "Insufficient creation fee");
-        
+
+        // Calculate excess refund before any state changes (CEI pattern)
+        uint256 excessRefund = msg.value - creationFee;
+
+        // Update factory statistics BEFORE external calls
+        totalFeesCollected += creationFee;
+
         // Deploy new bonding curve token with factory's current configuration
         BondingCurveToken newToken = new BondingCurveToken(
             name,                    // Token name
@@ -509,9 +533,9 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             buyTradingFee,         // Buy trading fee
             sellTradingFee         // Sell trading fee
         );
-        
+
         tokenAddress = address(newToken);
-        
+
         // Create comprehensive token information record
         TokenInfo memory tokenInfo = TokenInfo({
             tokenAddress: tokenAddress,
@@ -533,14 +557,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         isTokenCreated[tokenAddress] = true;                 // Mark as factory-created
         creatorTokens[msg.sender].push(newIndex);           // Add to creator's list
         
-        // Update factory statistics
-        totalFeesCollected += creationFee;
-        
-        // Refund any excess ETH payment to user
-        if (msg.value > creationFee) {
-            payable(msg.sender).transfer(msg.value - creationFee);
-        }
-        
         // Emit creation event for monitoring and indexing
         emit TokenCreated(
             tokenAddress,
@@ -552,7 +568,13 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             msg.sender,
             creationFee
         );
-        
+
+        // Refund any excess ETH payment to user (using safe transfer)
+        if (excessRefund > 0) {
+            (bool success, ) = payable(msg.sender).call{value: excessRefund}("");
+            require(success, "Refund transfer failed");
+        }
+
         return tokenAddress;
     }
     
@@ -686,10 +708,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyOwner {
         require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
 
-        // Test that the new collector can receive POL
-        // This prevents setting a contract that would revert and brick the system
-        (bool success, ) = payable(newPlatformFeeCollector).call{value: 0}("");
-        require(success, "Platform fee collector must be able to receive POL");
 
         address oldCollector = platformFeeCollector;
         platformFeeCollector = newPlatformFeeCollector;
@@ -710,9 +728,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     function updatePlatformFeeCollectorOnExistingToken(address token, address newPlatformFeeCollector) external onlyOwner validTokenAddress(token) {
         require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
 
-        // Test that the new collector can receive POL
-        (bool success, ) = payable(newPlatformFeeCollector).call{value: 0}("");
-        require(success, "Platform fee collector must be able to receive POL");
 
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
         tokenContract.updatePlatformFeeCollector(newPlatformFeeCollector);
