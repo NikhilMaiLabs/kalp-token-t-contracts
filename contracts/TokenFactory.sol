@@ -142,12 +142,18 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     /// @dev Applied to all new tokens, typically 0 (0% by default)
     /// @dev Can be set to generate immediate revenue from token trading
     uint256 public buyTradingFee = 0;
-    
+
     /// @notice Default sell trading fee for new tokens (basis points)
     /// @dev Applied to all new tokens, typically 0 (0% by default)
     /// @dev Can be set higher than buy fee to discourage selling pressure
     uint256 public sellTradingFee = 0;
-    
+
+    /// @notice Default percentage of trading fees allocated to creator (basis points)
+    /// @dev Applied to all new tokens, typically 5000 (50%)
+    /// @dev Determines creator/platform split of trading fees: creator gets this %, platform gets remainder
+    /// @dev Range: 0-10000 (0%-100%)
+    uint256 public creatorTradingFeeShare = 5000;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // TOKEN TRACKING AND INDEXING
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -290,7 +296,15 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @param sellFee New default sell trading fee in basis points
      */
     event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
-    
+
+    /**
+     * @notice Emitted when trading fee split is updated
+     * @dev Affects creator/platform split for all future tokens or specific token
+     * @param creatorShare New creator share in basis points
+     * @param platformShare New platform share in basis points
+     */
+    event TradingFeeSplitUpdated(uint256 creatorShare, uint256 platformShare);
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // MODIFIERS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -371,6 +385,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      *    - platformFee: 2000 basis points (20%)
      *    - buyTradingFee: 0 basis points (0%)
      *    - sellTradingFee: 0 basis points (0%)
+     *    - creatorTradingFeeShare: 5000 basis points (50%)
      *
      * Requirements:
      * - Can only be called once (enforced by initializer modifier)
@@ -414,6 +429,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         platformFee = 2000;
         buyTradingFee = 0;
         sellTradingFee = 0;
+        creatorTradingFeeShare = 5000; // 50% default split
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -567,7 +583,8 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             platformFee,           // Platform fee percentage
             platformFeeCollector,  // Address to receive fees
             buyTradingFee,         // Buy trading fee
-            sellTradingFee         // Sell trading fee
+            sellTradingFee,        // Sell trading fee
+            creatorTradingFeeShare // Trading fee split percentage
         );
 
         tokenAddress = address(newToken);
@@ -798,6 +815,71 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     function updateTradingFeesOnExistingToken(address token, uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyOwner validTokenAddress(token) {
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
         tokenContract.updateTradingFees(newBuyTradingFee, newSellTradingFee);
+    }
+
+    /**
+     * @notice Updates default trading fee split for future tokens
+     * @dev Only affects tokens created after this change
+     * @dev Existing tokens retain their original trading fee split settings
+     *
+     * @param newCreatorShare New default creator share in basis points (0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution Examples:
+     * - 5000: 50% creator, 50% platform (default balanced)
+     * - 7000: 70% creator, 30% platform (creator-favored)
+     * - 3000: 30% creator, 70% platform (platform-favored)
+     * - 10000: 100% creator, 0% platform (promotional)
+     * - 0: 0% creator, 100% platform (platform-only)
+     *
+     * Use Cases:
+     * - Adjust global incentive structure for new token creators
+     * - Launch promotional periods with higher creator rewards
+     * - Optimize platform revenue model based on market conditions
+     * - Align with governance-approved fee policies
+     */
+    function updateCreatorTradingFeeShare(uint256 newCreatorShare) external onlyOwner {
+        require(newCreatorShare <= 10000, "Creator share cannot exceed 100%");
+
+        creatorTradingFeeShare = newCreatorShare;
+        uint256 platformShare = 10000 - newCreatorShare;
+
+        emit TradingFeeSplitUpdated(newCreatorShare, platformShare);
+    }
+
+    /**
+     * @notice Updates trading fee split for a specific existing token
+     * @dev Allows dynamic adjustment of creator/platform fee distribution
+     * @dev Only affects future fee accumulations, not already accumulated fees
+     *
+     * @param token Address of the token to update
+     * @param newCreatorShare Percentage allocated to creator (basis points, 0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution Examples:
+     * - 5000: 50% creator, 50% platform (default balanced)
+     * - 7000: 70% creator, 30% platform (creator-favored)
+     * - 3000: 30% creator, 70% platform (platform-favored)
+     * - 10000: 100% creator, 0% platform (promotional)
+     * - 0: 0% creator, 100% platform (platform-only)
+     *
+     * Use Cases:
+     * - Adjust global incentive structure for new token creators
+     * - Launch promotional periods with higher creator rewards
+     * - Optimize platform revenue model based on market conditions
+     * - Align with governance-approved fee policies
+     * 
+     * Note: Does not affect already accumulated fees in the token contract
+     */
+    function updateTradingFeeShareOnExistingToken(address token, uint256 newCreatorShare) external onlyOwner validTokenAddress(token) {
+        BondingCurveToken tokenContract = BondingCurveToken(payable(token));
+        tokenContract.updateTradingFeeShare(newCreatorShare);
     }
     
     /**

@@ -176,7 +176,26 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @dev Applied on every sellTokens() call, max 1000 (10%)
     /// @dev Fee is calculated as: (refund * sellTradingFee) / 10000
     uint256 public sellTradingFee;
-    
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // TRADING FEE SPLIT CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Percentage of trading fees allocated to creator (in basis points)
+    /// @dev Set at deployment from factory configuration, can be updated by factory
+    /// @dev Range: 0-10000 (0%-100%)
+    uint256 public creatorTradingFeeShare;
+
+    /// @notice Accumulated trading fees claimable by creator (in wei)
+    /// @dev Incremented during buy/sell operations based on creatorTradingFeeShare
+    /// @dev Can be claimed by creator via claimCreatorTradingFees()
+    uint256 public accumulatedCreatorFees;
+
+    /// @notice Accumulated trading fees claimable by platform (in wei)
+    /// @dev Incremented during buy/sell operations based on remaining share
+    /// @dev Automatically transferred to platformFeeCollector when claimed
+    uint256 public accumulatedPlatformFees;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -223,6 +242,21 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @param owner Address that withdrew the dust
     /// @param amount Amount of POL withdrawn
     event DustWithdrawn(address indexed owner, uint256 amount);
+
+    /// @notice Emitted when creator claims accumulated trading fees
+    /// @param creator Address of the creator claiming fees
+    /// @param amount Amount of trading fees claimed in wei
+    event CreatorTradingFeesClaimed(address indexed creator, uint256 amount);
+
+    /// @notice Emitted when platform claims accumulated trading fees
+    /// @param platformFeeCollector Address of the platform fee collector
+    /// @param amount Amount of trading fees claimed in wei
+    event PlatformTradingFeesClaimed(address indexed platformFeeCollector, uint256 amount);
+
+    /// @notice Emitted when trading fee split is updated
+    /// @param creatorShare New creator share in basis points
+    /// @param platformShare New platform share in basis points
+    event TradingFeeSplitUpdated(uint256 creatorShare, uint256 platformShare);
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
@@ -292,6 +326,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @param _platformFeeCollector Address receiving all trading and platform fees
      * @param _buyTradingFee Fee charged on buy operations (basis points, max 1000 = 10%)
      * @param _sellTradingFee Fee charged on sell operations (basis points, max 1000 = 10%)
+     * @param _creatorTradingFeeShare Percentage of trading fees for creator (basis points, 0-10000)
      *
      * Validation Rules:
      * 1. Economic Parameters:
@@ -309,11 +344,12 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 3. Fee Structure:
      *    - Graduation fees: _liquidityFee + _creatorFee + _platformFee = 10000 (100%)
      *    - Trading fees: _buyTradingFee ≤ 1000, _sellTradingFee ≤ 1000
+     *    - Trading fee split: _creatorTradingFeeShare ≤ 10000
      *
      * State Initialization:
      * - Inherits from: ERC20, Ownable, ReentrancyGuard, Pausable, BlackList
      * - Sets immutable parameters: LIQUIDITY_FEE, CREATOR_FEE, PLATFORM_FEE
-     * - Sets mutable parameters: buyTradingFee, sellTradingFee (factory can update)
+     * - Sets mutable parameters: buyTradingFee, sellTradingFee, creatorTradingFeeShare (factory can update)
      * - Transfers ownership to _creator
      * - Initializes with zero supply (tokens minted via buyTokens)
      *
@@ -339,7 +375,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 _platformFee,
         address _platformFeeCollector,
         uint256 _buyTradingFee,
-        uint256 _sellTradingFee
+        uint256 _sellTradingFee,
+        uint256 _creatorTradingFeeShare
     ) ERC20(name, symbol) Ownable(_creator) {
         // Validate bonding curve parameters
         if (_slope == 0) revert InvalidParameter("slope");
@@ -356,7 +393,8 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         if (_liquidityFee + _creatorFee + _platformFee != 10000) revert InvalidParameter("fee distribution");
         if (_buyTradingFee > 1000) revert InvalidParameter("buyTradingFee");
         if (_sellTradingFee > 1000) revert InvalidParameter("sellTradingFee");
-        
+        if (_creatorTradingFeeShare > 10000) revert InvalidParameter("creatorTradingFeeShare");
+
         // Initialize bonding curve parameters
         slope = _slope;
         basePrice = _basePrice;
@@ -565,10 +603,14 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Update totalRaised with only the bonding curve cost
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
-        
-        // Transfer trading fee directly to platform fee collector
+
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).sendValue(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
         
         // Emit events for tracking
@@ -627,9 +669,13 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
 
-        // Transfer trading fee directly to platform fee collector
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).sendValue(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
 
         // Emit events for tracking (show recipient as the buyer)
@@ -688,10 +734,14 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Update totalRaised by the full proceeds amount
         // (This maintains bonding curve integrity)
         totalRaised -= proceeds;
-        
-        // Transfer trading fee to platform fee collector
+
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).sendValue(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
         
         // Emit events for tracking
@@ -954,6 +1004,50 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
 
         emit TradingFeesUpdated(newBuyTradingFee, newSellTradingFee);
     }
+
+    /**
+     * @notice Updates the trading fee split between creator and platform
+     * @dev Only callable by the factory contract
+     * @dev Allows dynamic adjustment of fee distribution after deployment
+     *
+     * @param newCreatorShare Percentage allocated to creator (basis points, 0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory contract
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution:
+     * - Creator receives: (tradingFee × newCreatorShare) / 10000
+     * - Platform receives: (tradingFee × (10000 - newCreatorShare)) / 10000
+     *
+     * Examples:
+     * - newCreatorShare = 5000: 50% creator, 50% platform (default)
+     * - newCreatorShare = 7000: 70% creator, 30% platform
+     * - newCreatorShare = 0: 0% creator, 100% platform
+     * - newCreatorShare = 10000: 100% creator, 0% platform
+     *
+     * Use Cases:
+     * - Adjust incentives for high-quality token creators
+     * - Platform revenue optimization
+     * - Promotional campaigns with higher creator rewards
+     * - Governance-approved fee structure changes
+     *
+     * Security:
+     * - Only factory (controlled by governance) can update
+     * - Does not affect already accumulated fees
+     * - Only affects future trading fee distributions
+     *
+     * Emits:
+     * - TradingFeeSplitUpdated(creatorShare, platformShare)
+     */
+    function updateTradingFeeShare(uint256 newCreatorShare) external onlyFactory {
+        if (newCreatorShare > 10000) revert InvalidParameter("creatorTradingFeeShare");
+
+        creatorTradingFeeShare = newCreatorShare;
+        uint256 platformShare = 10000 - newCreatorShare;
+
+        emit TradingFeeSplitUpdated(newCreatorShare, platformShare);
+    }
     
     /**
      * @notice Manually triggers graduation (factory only)
@@ -1048,6 +1142,84 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         payable(owner()).sendValue(balance);
 
         emit DustWithdrawn(owner(), balance);
+    }
+
+    /**
+     * @notice Allows creator to claim accumulated trading fees
+     * @dev Transfers all accumulated creator trading fees to the creator address
+     * @dev Can be called at any time (before or after graduation)
+     *
+     * Requirements:
+     * - Only callable by token creator (owner)
+     * - Must have accumulated fees > 0
+     *
+     * Fee Source:
+     * - Trading fees from buyTokens() operations split by creatorTradingFeeShare
+     * - Trading fees from sellTokens() operations split by creatorTradingFeeShare
+     * - Accumulated since last claim or token deployment
+     *
+     * Security:
+     * - Protected by onlyOwner modifier
+     * - Protected by nonReentrant modifier
+     * - Uses safe transfer via sendValue()
+     * - Resets accumulated fees to 0 before transfer (CEI pattern)
+     *
+     * Gas Optimization:
+     * - Recommend claiming periodically to avoid large accumulations
+     * - Consider batching with other owner operations
+     *
+     * Emits:
+     * - CreatorTradingFeesClaimed(creator, amount)
+     */
+    function claimCreatorTradingFees() external onlyOwner nonReentrant {
+        uint256 amount = accumulatedCreatorFees;
+        if (amount == 0) revert ZeroAmount();
+
+        // Reset accumulated fees before transfer (CEI pattern)
+        accumulatedCreatorFees = 0;
+
+        // Transfer fees to creator
+        payable(creator).sendValue(amount);
+
+        emit CreatorTradingFeesClaimed(creator, amount);
+    }
+
+    /**
+     * @notice Allows platform to claim accumulated trading fees
+     * @dev Transfers all accumulated platform trading fees to platformFeeCollector
+     * @dev Can be called by anyone but fees always go to platformFeeCollector
+     *
+     * Requirements:
+     * - Must have accumulated platform fees > 0
+     *
+     * Fee Source:
+     * - Trading fees from buyTokens() operations (platform share)
+     * - Trading fees from sellTokens() operations (platform share)
+     * - Accumulated since last claim or token deployment
+     *
+     * Security:
+     * - Protected by nonReentrant modifier
+     * - Uses safe transfer via sendValue()
+     * - Resets accumulated fees to 0 before transfer (CEI pattern)
+     * - Fees always sent to platformFeeCollector (cannot be redirected)
+     *
+     * Note: This function is callable by anyone to allow automated fee collection
+     * systems to operate without requiring private key access to factory owner.
+     *
+     * Emits:
+     * - PlatformTradingFeesClaimed(platformFeeCollector, amount)
+     */
+    function claimPlatformTradingFees() external nonReentrant {
+        uint256 amount = accumulatedPlatformFees;
+        if (amount == 0) revert ZeroAmount();
+
+        // Reset accumulated fees before transfer (CEI pattern)
+        accumulatedPlatformFees = 0;
+
+        // Transfer fees to platform fee collector
+        payable(platformFeeCollector).sendValue(amount);
+
+        emit PlatformTradingFeesClaimed(platformFeeCollector, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
