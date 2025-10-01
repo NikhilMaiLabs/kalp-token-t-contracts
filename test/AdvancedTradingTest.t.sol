@@ -7,6 +7,7 @@ import "../contracts/BondingCurveToken.sol";
 import "../contracts/mocks/MockUniswapV2Router.sol";
 import "../contracts/mocks/MockUniswapV2Factory.sol";
 import "../contracts/mocks/MockWETH.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
  * @title AdvancedTradingTest
@@ -33,7 +34,7 @@ contract AdvancedTradingTest is Test {
     // Token parameters optimized for fractional testing
     uint256 constant SLOPE = 1e15; // 0.001 wei per token increase (WAD scaled)
     uint256 constant BASE_PRICE = 1e15; // 0.001 wei starting price (WAD scaled)
-    uint256 constant GRADUATION_THRESHOLD = 1e50; // Extremely high threshold to prevent graduation
+    uint256 constant GRADUATION_THRESHOLD = 1e30; // Maximum allowed threshold to prevent graduation
     uint256 constant CREATION_FEE = 1 ether;
     
     function setUp() public {
@@ -48,17 +49,23 @@ contract AdvancedTradingTest is Test {
         MockWETH mockWETH = new MockWETH();
         MockUniswapV2Factory mockUniswapFactory = new MockUniswapV2Factory();
         MockUniswapV2Router mockRouter = new MockUniswapV2Router(
-            address(mockUniswapFactory), 
+            address(mockUniswapFactory),
             address(mockWETH)
         );
-        
-        // Deploy factory
-        vm.prank(owner);
-        factory = new TokenFactory(
+
+        // Deploy factory implementation
+        TokenFactory implementation = new TokenFactory();
+
+        // Deploy proxy and initialize
+        bytes memory initData = abi.encodeWithSelector(
+            TokenFactory.initialize.selector,
             address(mockRouter),
             platformFeeCollector,
             owner
         );
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        factory = TokenFactory(payable(address(proxy)));
         
         // Create token
         vm.prank(tokenCreator);

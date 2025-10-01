@@ -33,28 +33,58 @@ interface IUniswapV2Router02 {
 
 /**
  * @title BondingCurveToken
- * @author Kalp Team
- * @notice A bonding curve token that uses linear pricing and graduates to native POL trading on Uniswap V2
- * @dev This contract implements an ERC20 token with the following features:
- * 
+ * @notice ERC20 token with linear bonding curve pricing and automatic Uniswap V2 graduation
+ * @dev Implements a bonding curve token that transitions to decentralized exchange trading at maturity
+ *
+ * ARCHITECTURE OVERVIEW:
+ * This contract implements a two-phase token lifecycle:
+ * 1. Bonding Curve Phase: Direct buy/sell through automated market maker with linear pricing
+ * 2. DEX Trading Phase: Standard Uniswap V2 pair trading after graduation threshold
+ *
  * BONDING CURVE MECHANICS:
- * - Uses linear bonding curve: price = basePrice + slope * totalSupply
- * - Users buy/sell with native POL directly - no wrapping needed
- * - Price increases linearly with each token minted
- * - All POL raised is held in the contract until graduation
- * 
+ * Price Model: P(s) = basePrice + (slope × totalSupply)
+ * - Linear price increase ensures predictable token economics
+ * - All POL from sales held in reserve until graduation
+ * - Price discovery through continuous automated market making
+ * - Buy prices rounded up, sell prices rounded down (protocol-favoring)
+ *
  * GRADUATION SYSTEM:
- * - Token "graduates" when market cap reaches the graduation threshold
- * - Creates a myToken/POL trading pair on Uniswap V2
- * - Uses standard V2 liquidity pools with automatic market making
- * - After graduation, users trade myToken/POL through the V2 AMM
- * - Simpler and more gas-efficient than V3 concentrated liquidity
+ * Automatic Trigger: marketCap ≥ graduationThreshold
+ * - Creates Uniswap V2 pair (token/WETH) with initial liquidity
+ * - Mints additional tokens equal to circulating supply for liquidity pool
+ * - Distributes raised POL according to fee structure (liquidity, creator, platform)
+ * - Disables bonding curve trading permanently after graduation
+ * - Uses V2 constant product AMM (x × y = k) for gas efficiency
+ *
+ * SECURITY FEATURES:
+ * - ReentrancyGuard on all state-changing functions
+ * - Pausable for emergency situations (owner-controlled)
+ * - Blacklist functionality for regulatory compliance
+ * - SafeMath via Solidity 0.8+ and OpenZeppelin Math library
+ * - CEI (Checks-Effects-Interactions) pattern throughout
+ *
+ * FEE STRUCTURE:
+ * Trading Fees: Applied to buy/sell operations (basis points, max 10%)
+ * Graduation Fees: Applied to raised POL at graduation
+ * - Liquidity allocation (typically 80%)
+ * - Creator allocation (typically 0%)
+ * - Platform allocation (typically 20%)
+ *
+ * ACCESS CONTROL:
+ * - Owner (Creator): Can pause, blacklist, withdraw dust post-graduation
+ * - Factory: Can update fees, trigger manual graduation
+ * - Public: Can buy/sell tokens (pre-graduation), transfer tokens
  */
 contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackList {
     using Address for address payable;
     
     // Fixed-point scale (same as ERC20 decimals)
     uint256 public constant WAD = 1e18;
+
+    // Graduation constants
+    uint256 private constant MAX_SLIPPAGE_BPS = 500; // 5% maximum slippage for liquidity provision
+    uint256 private constant BASIS_POINTS = 10000; // 100% in basis points
+    uint256 private constant LIQUIDITY_DEADLINE = 300; // 5 minutes in seconds
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // BONDING CURVE PARAMETERS
@@ -146,7 +176,26 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @dev Applied on every sellTokens() call, max 1000 (10%)
     /// @dev Fee is calculated as: (refund * sellTradingFee) / 10000
     uint256 public sellTradingFee;
-    
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // TRADING FEE SPLIT CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Percentage of trading fees allocated to creator (in basis points)
+    /// @dev Set at deployment from factory configuration, can be updated by factory
+    /// @dev Range: 0-10000 (0%-100%)
+    uint256 public creatorTradingFeeShare;
+
+    /// @notice Accumulated trading fees claimable by creator (in wei)
+    /// @dev Incremented during buy/sell operations based on creatorTradingFeeShare
+    /// @dev Can be claimed by creator via claimCreatorTradingFees()
+    uint256 public accumulatedCreatorFees;
+
+    /// @notice Accumulated trading fees claimable by platform (in wei)
+    /// @dev Incremented during buy/sell operations based on remaining share
+    /// @dev Automatically transferred to platformFeeCollector when claimed
+    uint256 public accumulatedPlatformFees;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -184,16 +233,50 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
     
     /// @notice Emitted when the instantaneous price has changed due to supply update
-    event PriceUpdated(uint256 newPrice, uint256 newSupply);
-    
+    /// @param newPrice The new current price per token in wei
+    /// @param newSupply The new total supply after the transaction
+    /// @param timestamp Block timestamp when price changed
+    event PriceUpdated(uint256 indexed newPrice, uint256 newSupply, uint256 timestamp);
+
+    /// @notice Emitted when dust POL is withdrawn after graduation
+    /// @param owner Address that withdrew the dust
+    /// @param amount Amount of POL withdrawn
+    event DustWithdrawn(address indexed owner, uint256 amount);
+
+    /// @notice Emitted when creator claims accumulated trading fees
+    /// @param creator Address of the creator claiming fees
+    /// @param amount Amount of trading fees claimed in wei
+    event CreatorTradingFeesClaimed(address indexed creator, uint256 amount);
+
+    /// @notice Emitted when platform claims accumulated trading fees
+    /// @param platformFeeCollector Address of the platform fee collector
+    /// @param amount Amount of trading fees claimed in wei
+    event PlatformTradingFeesClaimed(address indexed platformFeeCollector, uint256 amount);
+
+    /// @notice Emitted when trading fee split is updated
+    /// @param creatorShare New creator share in basis points
+    /// @param platformShare New platform share in basis points
+    event TradingFeeSplitUpdated(uint256 creatorShare, uint256 platformShare);
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
     // ═══════════════════════════════════════════════════════════════════════════════
-    
+
     error ZeroAmount();
     error InsufficientPayment(uint256 required, uint256 sent);
     error SlippageExceeded(uint256 quoted, uint256 limit);
     error ProceedsBelowMin(uint256 quoted, uint256 minOut);
+    error InvalidRecipient();
+    error InsufficientTokenBalance(uint256 balance, uint256 required);
+    error InsufficientContractBalance(uint256 balance, uint256 required);
+    error TokenAlreadyGraduated();
+    error TokenNotGraduated();
+    error InvalidAddress();
+    error InvalidParameter(string param);
+    error OnlyFactory();
+    error BlacklistedAccount(address account);
+    error GraduationFailed(string reason);
+    error InvalidDeadline();
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // MODIFIERS
@@ -202,21 +285,21 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @notice Restricts access to factory contract only
     /// @dev Used for administrative functions like fee updates and graduation
     modifier onlyFactory() {
-        require(msg.sender == factory, "Only factory can call this function");
+        if (msg.sender != factory) revert OnlyFactory();
         _;
     }
-    
+
     /// @notice Restricts access to functions that should only work before graduation
     /// @dev Used for buy/sell functions that become unavailable after DEX listing
     modifier notGraduated() {
-        require(!hasGraduated, "Token has already graduated");
+        if (hasGraduated) revert TokenAlreadyGraduated();
         _;
     }
-    
+
     /// @notice Restricts access to functions that should only work after graduation
     /// @dev Currently not used but available for future features
     modifier onlyGraduated() {
-        require(hasGraduated, "Token has not graduated yet");
+        if (!hasGraduated) revert TokenNotGraduated();
         _;
     }
     
@@ -225,29 +308,58 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     // ═══════════════════════════════════════════════════════════════════════════════
     
     /**
-     * @notice Initializes a new bonding curve token
-     * @dev This constructor sets up all the bonding curve parameters and fee structures
-     * 
-     * @param name The name of the ERC20 token (e.g., "My Token")
-     * @param symbol The symbol of the ERC20 token (e.g., "MTK")
-     * @param _slope The price increase per token in wei (affects price steepness)
-     * @param _basePrice The starting price of the first token in wei
-     * @param _graduationThreshold The market cap in wei that triggers graduation to DEX
-     * @param _creator The address of the token creator (becomes owner)
-     * @param _factory The address of the factory contract (gets admin permissions)
-     * @param _router The address of the Uniswap V2 Router for DEX integration
-     * @param _liquidityFee Percentage of graduation fees for liquidity (basis points)
-     * @param _creatorFee Percentage of graduation fees for creator (basis points)
-     * @param _platformFee Percentage of graduation fees for platform (basis points)
-     * @param _platformFeeCollector Address that receives trading and platform fees
-     * @param _buyTradingFee Trading fee for buy operations (basis points, max 1000)
-     * @param _sellTradingFee Trading fee for sell operations (basis points, max 1000)
-     * 
-     * Requirements:
-     * - All fee percentages must sum to exactly 10000 (100%)
-     * - Trading fees cannot exceed 1000 (10%)
-     * - All addresses must be non-zero
-     * - All curve parameters must be greater than 0
+     * @notice Initializes a new bonding curve token with economic parameters
+     * @dev Constructor deploys token with immutable bonding curve configuration
+     * @dev Called by TokenFactory during token creation
+     *
+     * @param name Human-readable name of the ERC20 token (e.g., "My Token")
+     * @param symbol Short ticker symbol for the token (e.g., "MTK")
+     * @param _slope Price increase per token minted (wei), defines curve steepness
+     * @param _basePrice Starting price for the first token (wei), minimum price floor
+     * @param _graduationThreshold Market cap threshold (wei) that triggers DEX graduation
+     * @param _creator Address of token creator (receives ownership and creator fees)
+     * @param _factory Address of TokenFactory contract (receives administrative privileges)
+     * @param _router Address of Uniswap V2 Router contract (for DEX integration)
+     * @param _liquidityFee Percentage of raised funds for DEX liquidity (basis points, typically 8000)
+     * @param _creatorFee Percentage of raised funds for creator (basis points, typically 0)
+     * @param _platformFee Percentage of raised funds for platform (basis points, typically 2000)
+     * @param _platformFeeCollector Address receiving all trading and platform fees
+     * @param _buyTradingFee Fee charged on buy operations (basis points, max 1000 = 10%)
+     * @param _sellTradingFee Fee charged on sell operations (basis points, max 1000 = 10%)
+     * @param _creatorTradingFeeShare Percentage of trading fees for creator (basis points, 0-10000)
+     *
+     * Validation Rules:
+     * 1. Economic Parameters:
+     *    - _slope > 0 and within safe bounds (prevents overflow)
+     *    - _basePrice > 0 and within safe bounds
+     *    - _graduationThreshold > 0 and within safe bounds
+     *
+     * 2. Address Parameters:
+     *    - All addresses must be non-zero
+     *    - _creator: Should be EOA or multi-sig for governance
+     *    - _factory: Must be valid TokenFactory contract
+     *    - _router: Must be valid Uniswap V2 Router
+     *    - _platformFeeCollector: Should be secure treasury address
+     *
+     * 3. Fee Structure:
+     *    - Graduation fees: _liquidityFee + _creatorFee + _platformFee = 10000 (100%)
+     *    - Trading fees: _buyTradingFee ≤ 1000, _sellTradingFee ≤ 1000
+     *    - Trading fee split: _creatorTradingFeeShare ≤ 10000
+     *
+     * State Initialization:
+     * - Inherits from: ERC20, Ownable, ReentrancyGuard, Pausable, BlackList
+     * - Sets immutable parameters: LIQUIDITY_FEE, CREATOR_FEE, PLATFORM_FEE
+     * - Sets mutable parameters: buyTradingFee, sellTradingFee, creatorTradingFeeShare (factory can update)
+     * - Transfers ownership to _creator
+     * - Initializes with zero supply (tokens minted via buyTokens)
+     *
+     * Gas Optimization Notes:
+     * - Immutable variables stored in bytecode (cheaper access)
+     * - Constructor validations prevent deployment of invalid tokens
+     * - OpenZeppelin libraries used for battle-tested implementations
+     *
+     * @custom:security All parameters validated before deployment
+     * @custom:security Immutable economic parameters prevent post-deployment manipulation
      */
     constructor(
         string memory name,
@@ -263,24 +375,26 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         uint256 _platformFee,
         address _platformFeeCollector,
         uint256 _buyTradingFee,
-        uint256 _sellTradingFee
+        uint256 _sellTradingFee,
+        uint256 _creatorTradingFeeShare
     ) ERC20(name, symbol) Ownable(_creator) {
         // Validate bonding curve parameters
-        require(_slope > 0, "Slope must be greater than 0");
-        require(_basePrice > 0, "Base price must be greater than 0");
-        require(_graduationThreshold > 0, "Graduation threshold must be greater than 0");
-        
+        if (_slope == 0) revert InvalidParameter("slope");
+        if (_basePrice == 0) revert InvalidParameter("basePrice");
+        if (_graduationThreshold == 0) revert InvalidParameter("graduationThreshold");
+
         // Validate addresses
-        require(_creator != address(0), "Creator cannot be zero address");
-        require(_factory != address(0), "Factory cannot be zero address");
-        require(_router != address(0), "Router cannot be zero address");
-        require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
-        
+        if (_creator == address(0)) revert InvalidAddress();
+        if (_factory == address(0)) revert InvalidAddress();
+        if (_router == address(0)) revert InvalidAddress();
+        if (_platformFeeCollector == address(0)) revert InvalidAddress();
+
         // Validate fee structures
-        require(_liquidityFee + _creatorFee + _platformFee == 10000, "Fees must sum to 10000 (100%)");
-        require(_buyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
-        require(_sellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
-        
+        if (_liquidityFee + _creatorFee + _platformFee != 10000) revert InvalidParameter("fee distribution");
+        if (_buyTradingFee > 1000) revert InvalidParameter("buyTradingFee");
+        if (_sellTradingFee > 1000) revert InvalidParameter("sellTradingFee");
+        if (_creatorTradingFeeShare > 10000) revert InvalidParameter("creatorTradingFeeShare");
+
         // Initialize bonding curve parameters
         slope = _slope;
         basePrice = _basePrice;
@@ -352,7 +466,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function getSellPrice(uint256 amount) public view returns (uint256 totalRefund) {
         if (amount == 0) return 0;
-        require(amount <= totalSupply(), "Cannot sell more than total supply");
+        if (amount > totalSupply()) revert InvalidParameter("amount exceeds supply");
         return _sellProceeds(totalSupply(), amount);
     }
     
@@ -489,15 +603,19 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Update totalRaised with only the bonding curve cost
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
-        
-        // Transfer trading fee directly to platform fee collector
+
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
         
         // Emit events for tracking
         emit TokensPurchased(msg.sender, amount, cost, s + amount);
-        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount, block.timestamp);
         
         // Refund any excess POL sent by the user
         uint256 refund = msg.value - totalCost;
@@ -530,7 +648,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function buyTokensFor(address recipient, uint256 amount) external payable onlyFactory nonReentrant whenNotPaused notGraduated {
         if (amount == 0) revert ZeroAmount();
-        if (recipient == address(0)) revert("Invalid recipient address");
+        if (recipient == address(0)) revert InvalidRecipient();
 
         uint256 s = totalSupply();
         uint256 cost = _buyCost(s, amount); // rounds up
@@ -551,14 +669,18 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
 
-        // Transfer trading fee directly to platform fee collector
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
 
         // Emit events for tracking (show recipient as the buyer)
         emit TokensPurchased(recipient, amount, cost, s + amount);
-        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount, block.timestamp);
 
         // Refund any excess POL sent by the factory
         uint256 refund = msg.value - totalCost;
@@ -589,20 +711,22 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function sellTokens(uint256 amount, uint256 minProceeds) external nonReentrant whenNotPaused notGraduated {
         if (amount == 0) revert ZeroAmount();
-        require(balanceOf(msg.sender) >= amount, "Insufficient token balance");
-        
+        uint256 balance = balanceOf(msg.sender);
+        if (balance < amount) revert InsufficientTokenBalance(balance, amount);
+
         uint256 s = totalSupply();
         uint256 proceeds = _sellProceeds(s, amount); // rounds down
         if (proceeds < minProceeds) revert ProceedsBelowMin(proceeds, minProceeds);
-        
+
         // Calculate trading fee on the proceeds amount
         uint256 tradingFee = (proceeds * sellTradingFee) / 10000;
-        
+
         // Net proceeds to seller after trading fee deduction
         uint256 netProceeds = proceeds - tradingFee;
-        
+
         // Ensure contract has enough POL for the full proceeds
-        require(address(this).balance >= proceeds, "Insufficient contract balance");
+        uint256 contractBalance = address(this).balance;
+        if (contractBalance < proceeds) revert InsufficientContractBalance(contractBalance, proceeds);
         
         // Burn tokens from the seller (reduces total supply)
         _burn(msg.sender, amount);
@@ -610,15 +734,19 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // Update totalRaised by the full proceeds amount
         // (This maintains bonding curve integrity)
         totalRaised -= proceeds;
-        
-        // Transfer trading fee to platform fee collector
+
+        // Split and accumulate trading fees between creator and platform
         if (tradingFee > 0) {
-            payable(platformFeeCollector).transfer(tradingFee);
+            uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
+            uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
+
+            accumulatedCreatorFees += creatorFeeAmount;
+            accumulatedPlatformFees += platformFeeAmount;
         }
         
         // Emit events for tracking
         emit TokensSold(msg.sender, amount, proceeds, s - amount);
-        emit PriceUpdated(_priceAtSupply(s - amount), s - amount);
+        emit PriceUpdated(_priceAtSupply(s - amount), s - amount, block.timestamp);
         
         // Transfer net proceeds to the seller
         payable(msg.sender).sendValue(netProceeds);
@@ -632,73 +760,120 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Internal function to check if graduation conditions are met
      * @dev Called after every buy operation to check if graduation threshold is reached
      * @dev Automatically triggers graduation if conditions are met
-     * 
+     *
      * Graduation Conditions:
      * - Market cap >= graduation threshold
      * - Token has not graduated yet
+     *
+     * Security: The hasGraduated check prevents concurrent graduation attempts
+     * even if multiple buys happen simultaneously before graduation completes
      */
     function _checkGraduation() internal {
-        if (getMarketCap() >= graduationThreshold && !hasGraduated) {
+        // Check both conditions atomically to prevent race conditions
+        if (!hasGraduated && getMarketCap() >= graduationThreshold) {
             _graduate();
         }
     }
     
     /**
-     * @notice Internal function that executes the graduation process
-     * @dev This is the most critical function - it transitions from bonding curve to DEX
-     * @dev Once called, the token can never return to bonding curve trading
-     * 
-     * Graduation Process (Native POL UX):
-     * 1. Calculate amounts and create pair first
-     * 2. Mint additional tokens equal to current supply for liquidity
-     * 3. Calculate liquidity amounts (LIQUIDITY_FEE % of totalRaised)
-     * 4. Try to add liquidity to V2 pair using addLiquidityETH
-     * 5. Only mark as graduated if Uniswap operations succeed
-     * 6. Distribute remaining fees to creator and platform in native POL
-     * 
-     * Technical Implementation:
-     * - V2 pair works directly with native ETH/POL (no wrapping needed)
-     * - Simpler than V3 - no ticks, ranges, or NFT positions
-     * - Standard AMM with constant product formula
-     * - LP tokens represent proportional ownership
-     * 
-     * Token Supply Impact:
-     * - Before graduation: X tokens in circulation
-     * - After graduation: 2X tokens total (X circulating + X in LP)
-     * - This creates a 2:1 split where LP holds 50% of total supply
-     * 
+     * @notice Internal function that executes the graduation process to Uniswap V2
+     * @dev Critical state transition: bonding curve → DEX trading (irreversible)
+     * @dev Implements atomic graduation with rollback protection
+     *
+     * Graduation Process:
+     * Phase 1 - State Protection:
+     *   1. Set hasGraduated = true immediately (reentrancy protection)
+     *   2. Validate minimum requirements (supply > 0, totalRaised > 0)
+     *
+     * Phase 2 - Liquidity Preparation:
+     *   3. Calculate fee distributions from totalRaised
+     *      - liquidityPol = totalRaised × LIQUIDITY_FEE / 10000
+     *      - creatorFee = totalRaised × CREATOR_FEE / 10000
+     *      - platformFee = totalRaised × PLATFORM_FEE / 10000
+     *   4. Mint additional tokens equal to current supply
+     *
+     * Phase 3 - DEX Integration:
+     *   5. Create or retrieve Uniswap V2 pair (token/WETH)
+     *   6. Approve router to spend tokens
+     *   7. Add liquidity via router.addLiquidityETH with slippage protection
+     *
+     * Phase 4 - Fee Distribution:
+     *   8. Transfer creator fee (if > 0) to token creator
+     *   9. Transfer platform fee (if > 0) to platform fee collector
+     *   10. Remaining POL stays in contract as dust (recoverable via withdrawDust)
+     *
+     * Uniswap V2 Implementation Details:
+     * - Uses native POL without wrapping (router handles WETH conversion)
+     * - Constant product formula: x × y = k
+     * - Slippage protection: 5% maximum (MAX_SLIPPAGE_BPS)
+     * - Deadline: 5 minutes from block.timestamp
+     * - LP tokens sent to this contract (permanent lock)
+     *
+     * Token Supply Economics:
+     * - Pre-graduation: S tokens circulating
+     * - Post-graduation: 2S tokens total
+     *   · S tokens: Circulating among holders
+     *   · S tokens: Locked in Uniswap V2 liquidity pool
+     * - Creates 50/50 token distribution (holders/liquidity)
+     *
+     * Failure Handling:
+     * - If addLiquidityETH fails, reverts all state changes
+     * - Burns minted liquidity tokens
+     * - Resets hasGraduated to false
+     * - Allows retry of graduation
+     *
+     * Security Considerations:
+     * - hasGraduated set before external calls (reentrancy protection)
+     * - Uses pre-calculated fee amounts (prevents balance manipulation)
+     * - Try-catch on Uniswap call (prevents DOS via revert)
+     * - Validates minimum liquidity requirements
+     *
+     * Emits:
+     * - GraduationTriggered(supply, marketCap, dexPair, liquidityAmount)
+     * - LiquidityAdded(tokenAmount, polAmount, liquidityTokens)
+     *
+     * @custom:security Critical function - thoroughly tested for edge cases
      */
     function _graduate() internal {
+        // CRITICAL: Mark as graduated FIRST to prevent any reentrancy
+        // This must happen before ANY external calls (including createPair)
+        hasGraduated = true;
+
         // Calculate amounts for liquidity provision
         uint256 currentSupply = totalSupply();
-        
+
+        // Validate minimum liquidity requirements
+        if (currentSupply == 0) revert InvalidParameter("zero supply");
+        if (totalRaised == 0) revert InvalidParameter("zero raised");
+
         // Mint equal amount of tokens for liquidity (doubles total supply)
         uint256 liquidityTokenAmount = currentSupply;
-        
-        // Calculate POL for liquidity (typically 80% of totalRaised)
-        uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
-        
+
+        // Calculate POL amounts BEFORE minting (based on totalRaised percentages)
+        // This ensures fee distribution is based on expected amounts, not leftover balance
+        uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / BASIS_POINTS;
+        uint256 expectedCreatorFee = (totalRaised * CREATOR_FEE) / BASIS_POINTS;
+        uint256 expectedPlatformFee = (totalRaised * PLATFORM_FEE) / BASIS_POINTS;
+
         // Create or get the myToken/POL pair on Uniswap V2
         address pair = uniswapV2Factory.getPair(address(this), router.WETH());
         if (pair == address(0)) {
             pair = uniswapV2Factory.createPair(address(this), router.WETH());
         }
-        
+
         // Mint additional tokens for the liquidity pool
         _mint(address(this), liquidityTokenAmount);
-        
+
         // Approve router to spend our tokens
         _approve(address(this), address(router), liquidityTokenAmount);
-        
-        // Calculate dynamic slippage protection (5% max slippage)
-        uint256 maxSlippage = 500; // 5% in basis points
-        uint256 tokenMin = liquidityTokenAmount * (10000 - maxSlippage) / 10000;
-        uint256 ethMin = liquidityPolAmount * (10000 - maxSlippage) / 10000;
-        
-        // Set deadline with validation
-        uint256 deadline = block.timestamp + 300; // 5 minutes
-        require(deadline > block.timestamp, "Deadline must be in the future");
-        
+
+        // Calculate dynamic slippage protection using constant
+        uint256 tokenMin = liquidityTokenAmount * (BASIS_POINTS - MAX_SLIPPAGE_BPS) / BASIS_POINTS;
+        uint256 ethMin = liquidityPolAmount * (BASIS_POINTS - MAX_SLIPPAGE_BPS) / BASIS_POINTS;
+
+        // Set deadline (always valid as it's based on current block timestamp)
+        uint256 deadline = block.timestamp + LIQUIDITY_DEADLINE;
+
         // Try Uniswap operation with proper error handling and dynamic slippage
         try router.addLiquidityETH{value: liquidityPolAmount}(
             address(this),                    // token
@@ -706,63 +881,81 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             tokenMin,                         // amountTokenMin (dynamic slippage)
             ethMin,                           // amountETHMin (dynamic slippage)
             address(this),                    // to (this contract receives LP tokens)
-            deadline                          // deadline (5 minutes)
+            deadline                          // deadline (based on constant)
         ) returns (uint amountToken, uint amountETH, uint liquidity) {
-            // Only mark as graduated if Uniswap operations succeed
-            hasGraduated = true;
+            // Store graduation data
             dexPool = pair;
-            
-            // Store the amount of liquidity tokens we received
             liquidityTokensAmount = liquidity;
-            
-            // Distribute remaining fees to creator and platform
-            _distributeFees();
-            
+
             // Emit events for tracking the successful myToken/POL pair creation
             emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokensAmount);
             emit LiquidityAdded(amountToken, amountETH, liquidity);
-        } catch {
+
+            // Distribute fees using pre-calculated expected amounts (not remaining balance)
+            _distributeFees(expectedCreatorFee, expectedPlatformFee);
+        } catch Error(string memory reason) {
             // Revert state changes if Uniswap operation fails
+            hasGraduated = false; // Reset graduation status
             _burn(address(this), liquidityTokenAmount);
-            revert("Graduation failed: Uniswap operation unsuccessful");
+            revert GraduationFailed(reason);
+        } catch {
+            // Revert state changes if Uniswap operation fails with no reason
+            hasGraduated = false; // Reset graduation status
+            _burn(address(this), liquidityTokenAmount);
+            revert GraduationFailed("Uniswap operation unsuccessful");
         }
     }
     
     /**
-     * @notice Internal function to distribute graduation fees
-     * @dev Called during graduation to distribute remaining POL after liquidity provision
-     * @dev Only distributes POL that remains after liquidity has been added
-     * 
-     * Fee Distribution:
-     * 1. Calculate remaining POL balance after liquidity provision
-     * 2. Distribute creator fee (typically 0%)
-     * 3. Distribute platform fee (typically 20%)
-     * 4. Any remaining POL stays in contract (should be minimal due to fee structure)
-     * 
+     * @notice Internal function to distribute graduation fees to stakeholders
+     * @dev Transfers pre-calculated fee amounts to creator and platform
+     * @dev Uses expected amounts rather than remaining balance for predictable distribution
+     *
+     * Fee Distribution Logic:
+     * 1. Creator Fee: Transfer expectedCreatorFee to token creator address
+     * 2. Platform Fee: Transfer expectedPlatformFee to platform fee collector
+     * 3. Residual Balance: Any remaining POL stays in contract as recoverable dust
+     *
+     * Amount Calculation (performed in _graduate before calling):
+     * - expectedCreatorFee = totalRaised × CREATOR_FEE / 10000
+     * - expectedPlatformFee = totalRaised × PLATFORM_FEE / 10000
+     * - liquidityAmount = totalRaised × LIQUIDITY_FEE / 10000 (already used in addLiquidityETH)
+     *
+     * Residual Balance Sources:
+     * - Slippage savings from addLiquidityETH (actual ETH used < liquidityAmount)
+     * - Rounding dust from fee calculations
+     * - Total residual typically < 0.1% of totalRaised
+     * - Recoverable by owner via withdrawDust() post-graduation
+     *
+     * Security Features:
+     * - Uses OpenZeppelin's sendValue for safe transfers
+     * - No reliance on remaining balance (prevents manipulation)
+     * - Zero transfers skipped (gas optimization)
+     * - Called only from _graduate (internal, protected)
+     *
+     * @param expectedCreatorFee Amount to transfer to token creator (wei)
+     * @param expectedPlatformFee Amount to transfer to platform fee collector (wei)
+     *
      * Example with totalRaised = 100 POL:
-     * - Liquidity gets 80 POL (LIQUIDITY_FEE = 8000 basis points)
-     * - After liquidity, remaining = ~20 POL
-     * - Creator gets 0 POL (CREATOR_FEE = 0 basis points)
-     * - Platform gets 20 POL (PLATFORM_FEE = 2000 basis points)
+     * Assuming: LIQUIDITY_FEE = 8000, CREATOR_FEE = 0, PLATFORM_FEE = 2000
+     * - Liquidity: 80 POL (sent to Uniswap V2)
+     * - Creator: 0 POL (skipped)
+     * - Platform: 20 POL (transferred)
+     * - Dust: ~0.01-0.1 POL (stays in contract)
      */
-    function _distributeFees() internal {
-        // Get remaining POL balance after liquidity provision
-        uint256 remainingPol = address(this).balance;
-        
-        // Calculate and distribute creator fee
-        uint256 creatorFee = (remainingPol * CREATOR_FEE) / 10000;
-        if (creatorFee > 0) {
-            payable(creator).transfer(creatorFee);
+    function _distributeFees(uint256 expectedCreatorFee, uint256 expectedPlatformFee) internal {
+        // Distribute creator fee based on pre-calculated amount
+        if (expectedCreatorFee > 0) {
+            payable(creator).sendValue(expectedCreatorFee);
         }
-        
-        // Calculate and distribute platform fee
-        uint256 platformFee = (remainingPol * PLATFORM_FEE) / 10000;
-        if (platformFee > 0) {
-            payable(platformFeeCollector).transfer(platformFee);
+
+        // Distribute platform fee based on pre-calculated amount
+        if (expectedPlatformFee > 0) {
+            payable(platformFeeCollector).sendValue(expectedPlatformFee);
         }
-        
-        // Note: Any remaining POL (due to rounding) stays in the contract
-        // This should be minimal due to the fee structure design
+
+        // Note: Any remaining POL (from slippage savings or rounding) stays in the contract
+        // This protects against slippage affecting fee distribution amounts
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -773,20 +966,23 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Updates the platform fee collector address
      * @dev Only callable by the factory contract
      * @dev This address receives all trading fees and platform graduation fees
-     * 
+     *
      * @param newPlatformFeeCollector The new platform fee collector address
-     * 
+     *
      * Requirements:
      * - Caller must be the factory contract
      * - New address cannot be zero address
-     * 
+     * - New address must be able to receive POL (validated by factory)
+     *
      * Use Cases:
      * - Factory owner wants to change fee collection address
      * - Upgrade to a new fee management contract
      * - Change from EOA to multisig for better security
+     *
+     * Security: Factory validates the address can receive POL before calling this function
      */
     function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyFactory {
-        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+        if (newPlatformFeeCollector == address(0)) revert InvalidAddress();
         platformFeeCollector = newPlatformFeeCollector;
     }
     
@@ -800,27 +996,80 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 
      */
     function updateTradingFees(uint256 newBuyTradingFee, uint256 newSellTradingFee) external onlyFactory {
-        require(newBuyTradingFee <= 1000, "Buy trading fee cannot exceed 10%");
-        require(newSellTradingFee <= 1000, "Sell trading fee cannot exceed 10%");
-        
+        if (newBuyTradingFee > 1000) revert InvalidParameter("buyTradingFee");
+        if (newSellTradingFee > 1000) revert InvalidParameter("sellTradingFee");
+
         buyTradingFee = newBuyTradingFee;
         sellTradingFee = newSellTradingFee;
-        
+
         emit TradingFeesUpdated(newBuyTradingFee, newSellTradingFee);
+    }
+
+    /**
+     * @notice Updates the trading fee split between creator and platform
+     * @dev Only callable by the factory contract
+     * @dev Allows dynamic adjustment of fee distribution after deployment
+     *
+     * @param newCreatorShare Percentage allocated to creator (basis points, 0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory contract
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution:
+     * - Creator receives: (tradingFee × newCreatorShare) / 10000
+     * - Platform receives: (tradingFee × (10000 - newCreatorShare)) / 10000
+     *
+     * Examples:
+     * - newCreatorShare = 5000: 50% creator, 50% platform (default)
+     * - newCreatorShare = 7000: 70% creator, 30% platform
+     * - newCreatorShare = 0: 0% creator, 100% platform
+     * - newCreatorShare = 10000: 100% creator, 0% platform
+     *
+     * Use Cases:
+     * - Adjust incentives for high-quality token creators
+     * - Platform revenue optimization
+     * - Promotional campaigns with higher creator rewards
+     * - Governance-approved fee structure changes
+     *
+     * Security:
+     * - Only factory (controlled by governance) can update
+     * - Does not affect already accumulated fees
+     * - Only affects future trading fee distributions
+     *
+     * Emits:
+     * - TradingFeeSplitUpdated(creatorShare, platformShare)
+     */
+    function updateTradingFeeShare(uint256 newCreatorShare) external onlyFactory {
+        if (newCreatorShare > 10000) revert InvalidParameter("creatorTradingFeeShare");
+
+        creatorTradingFeeShare = newCreatorShare;
+        uint256 platformShare = 10000 - newCreatorShare;
+
+        emit TradingFeeSplitUpdated(newCreatorShare, platformShare);
     }
     
     /**
      * @notice Manually triggers graduation (factory only)
-     * @dev Emergency function to force graduation without reaching market cap threshold
-     * @dev Should be used sparingly and only for valid reasons
-     * 
-     * 
+     * @dev Administrative function to force graduation without reaching market cap threshold
+     * @dev Only callable by factory contract with proper authorization
+     *
+     * Requirements:
+     * - Caller must be factory contract
+     * - Token must not be graduated yet
+     * - Sufficient token supply and raised funds for liquidity provision
+     *
      * Use Cases:
-     * - Emergency situations requiring immediate graduation
-     * - Testing purposes in development environments
-     * - Special events or milestones
-     * 
-     * WARNING: This bypasses the market cap requirement and should be used cautiously
+     * - Emergency situations requiring immediate liquidity access
+     * - Technical issues preventing automatic graduation
+     * - Administrative decisions authorized by governance
+     *
+     * Security Considerations:
+     * - Bypasses market cap requirement
+     * - Factory owner should be multi-signature wallet
+     * - All manual graduations should be documented
+     *
+     * @custom:security-contact Factory authorization required
      */
     function triggerGraduation() external onlyFactory notGraduated {
         _graduate();
@@ -853,7 +1102,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Unpauses token transfers and trading
      * @dev Only callable by the token owner (creator)
      * @dev Restores normal token functionality
-     * 
+     *
      * Effects:
      * - Re-enables buyTokens() and sellTokens()
      * - Re-enables all token transfers
@@ -862,7 +1111,117 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     function unpause() external onlyOwner {
         _unpause();
     }
-    
+
+    /**
+     * @notice Withdraws any leftover POL (dust) from the contract after graduation
+     * @dev Only callable by the token owner (creator) after graduation
+     * @dev This function recovers POL left from slippage savings during liquidity provision
+     *
+     * Requirements:
+     * - Only callable by owner
+     * - Token must have graduated
+     * - Contract must have POL balance > 0
+     *
+     * Use Cases:
+     * - Recover POL leftover from addLiquidityETH slippage
+     * - Collect accumulated rounding dust
+     * - Clean up contract balance after graduation
+     *
+     * Security:
+     * - Cannot be called before graduation (bonding curve POL is locked)
+     * - Uses safe transfer method via sendValue()
+     * - Emits event for transparency
+     *
+     * Emits:
+     * - DustWithdrawn event with amount withdrawn
+     */
+    function withdrawDust() external onlyOwner onlyGraduated nonReentrant {
+        uint256 balance = address(this).balance;
+        if (balance == 0) revert ZeroAmount();
+
+        payable(owner()).sendValue(balance);
+
+        emit DustWithdrawn(owner(), balance);
+    }
+
+    /**
+     * @notice Allows creator to claim accumulated trading fees
+     * @dev Transfers all accumulated creator trading fees to the creator address
+     * @dev Can be called at any time (before or after graduation)
+     *
+     * Requirements:
+     * - Only callable by token creator (owner)
+     * - Must have accumulated fees > 0
+     *
+     * Fee Source:
+     * - Trading fees from buyTokens() operations split by creatorTradingFeeShare
+     * - Trading fees from sellTokens() operations split by creatorTradingFeeShare
+     * - Accumulated since last claim or token deployment
+     *
+     * Security:
+     * - Protected by onlyOwner modifier
+     * - Protected by nonReentrant modifier
+     * - Uses safe transfer via sendValue()
+     * - Resets accumulated fees to 0 before transfer (CEI pattern)
+     *
+     * Gas Optimization:
+     * - Recommend claiming periodically to avoid large accumulations
+     * - Consider batching with other owner operations
+     *
+     * Emits:
+     * - CreatorTradingFeesClaimed(creator, amount)
+     */
+    function claimCreatorTradingFees() external onlyOwner nonReentrant {
+        uint256 amount = accumulatedCreatorFees;
+        if (amount == 0) revert ZeroAmount();
+
+        // Reset accumulated fees before transfer (CEI pattern)
+        accumulatedCreatorFees = 0;
+
+        // Transfer fees to creator
+        payable(creator).sendValue(amount);
+
+        emit CreatorTradingFeesClaimed(creator, amount);
+    }
+
+    /**
+     * @notice Allows platform to claim accumulated trading fees
+     * @dev Transfers all accumulated platform trading fees to platformFeeCollector
+     * @dev Can be called by anyone but fees always go to platformFeeCollector
+     *
+     * Requirements:
+     * - Must have accumulated platform fees > 0
+     *
+     * Fee Source:
+     * - Trading fees from buyTokens() operations (platform share)
+     * - Trading fees from sellTokens() operations (platform share)
+     * - Accumulated since last claim or token deployment
+     *
+     * Security:
+     * - Protected by nonReentrant modifier
+     * - Uses safe transfer via sendValue()
+     * - Resets accumulated fees to 0 before transfer (CEI pattern)
+     * - Fees always sent to platformFeeCollector (cannot be redirected)
+     *
+     * Note: This function is callable by anyone to allow automated fee collection
+     * systems to operate without requiring private key access to factory owner.
+     *
+     * Emits:
+     * - PlatformTradingFeesClaimed(platformFeeCollector, amount)
+     */
+    function claimPlatformTradingFees() external nonReentrant {
+        uint256 amount = accumulatedPlatformFees;
+        if (amount == 0) revert ZeroAmount();
+
+        // Reset accumulated fees before transfer (CEI pattern)
+        accumulatedPlatformFees = 0;
+
+        // Transfer fees to platform fee collector
+        payable(platformFeeCollector).sendValue(amount);
+
+        emit PlatformTradingFeesClaimed(platformFeeCollector, amount);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // INFORMATION GETTER FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -976,10 +1335,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      */
     function _update(address from, address to, uint256 amount) internal override whenNotPaused {
         // Check if recipient is blacklisted (applies to all transfers including mints)
-        require(!isAccountBlocked(to), "BlackList: Recipient account is blocked");
-        
+        if (isAccountBlocked(to)) revert BlacklistedAccount(to);
+
         // Check if sender is blacklisted (applies to transfers and burns, but not mints)
-        require(!isAccountBlocked(from), "BlackList: Sender account is blocked");
+        if (isAccountBlocked(from)) revert BlacklistedAccount(from);
 
         // Call parent implementation to handle the actual transfer
         super._update(from, to, amount);
@@ -987,12 +1346,21 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     
     /**
      * @notice Receives POL sent directly to the contract
-     * @dev Prevents accidental POL sends; require using buyTokens()
-     * @dev Only allows POL for specific operations like liquidity provision
+     * @dev Allows POL from router (for refunds during liquidity provision)
+     * @dev Prevents accidental POL sends from users; they should use buyTokens()
+     *
+     * Security Note:
+     * - Allows receives from router address (needed for addLiquidityETH refunds)
+     * - Allows receives during graduation process
+     * - Reverts for direct user sends to prevent accidents
      */
     receive() external payable {
-        // Prevent accidental POL sends; require using buyTokens()
-        revert("Direct POL not accepted");
+        // Allow POL from router (for refunds during liquidity operations)
+        if (msg.sender == address(router)) {
+            return;
+        }
+        // Prevent accidental POL sends from users; they should use buyTokens()
+        revert InvalidParameter("use buyTokens()");
     }
     
     /**

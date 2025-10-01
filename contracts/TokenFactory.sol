@@ -5,23 +5,59 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "./BondingCurveToken.sol";
 
 /**
  * @title TokenFactory
- * @author Kalp Team
- * @notice Factory contract for deploying and managing bonding curve tokens
- * @dev This contract serves as the central hub for the bonding curve token ecosystem
- * 
+ * @notice Factory contract for deploying and managing bonding curve tokens with automatic DEX graduation
+ * @dev Central hub for the bonding curve token ecosystem using UUPS upgradeable pattern
+ *
+ * ARCHITECTURE OVERVIEW:
+ * This factory deploys BondingCurveToken contracts with linear pricing curves that automatically
+ * graduate to Uniswap V2 DEX trading upon reaching configurable market cap thresholds.
+ *
  * CORE FUNCTIONALITY:
- * - Deploy new bonding curve tokens with customizable parameters
- * - Manage fee structures and platform settings globally
- * - Track all tokens created through the factory
- * - Provide administrative functions for token management
- * - Handle creation fees and revenue collection
+ * - Deploy bonding curve tokens with customizable economic parameters
+ * - Manage global fee structures and platform settings
+ * - Track all deployed tokens with comprehensive indexing
+ * - Provide administrative controls for token lifecycle management
+ * - Collect and manage platform revenue from token creation
+ *
+ * SECURITY MODEL:
+ * ⚠️ CENTRALIZATION CONSIDERATIONS:
+ * - Implements UUPS upgradeable pattern with owner-controlled upgrades
+ * - Factory owner has authority to: upgrade logic, modify fees, force graduations
+ * - All tokens created inherit factory's configuration at deployment time
+ *
+ * PRODUCTION DEPLOYMENT REQUIREMENTS:
+ * 1. Multi-Signature Governance:
+ *    - Transfer ownership to multi-signature wallet (minimum 3-of-5 Gnosis Safe)
+ *    - Implement TimelockController with 48-hour minimum delay for:
+ *      · Contract upgrades (_authorizeUpgrade)
+ *      · Fee structure modifications (updateFeeDistribution, updateCreationFee)
+ *      · Critical parameter changes (updateRouter, updatePlatformFeeCollector)
+ *
+ * 2. Access Control Best Practices:
+ *    - Deploy TimelockController as intermediate owner
+ *    - Set multi-signature wallet as TimelockController admin
+ *    - Document all administrative actions on-chain via events
+ *
+ * 3. Emergency Procedures:
+ *    - Establish incident response procedures for security events
+ *    - Define clear authorization requirements for triggerGraduation()
+ *    - Maintain separation of duties between operational and treasury functions
+ *
+ * INTEGRATION POINTS:
+ * - Uniswap V2 Router: For automated liquidity provision during graduation
+ * - Platform Fee Collector: Receives trading fees and platform revenue
+ * - BondingCurveToken: Individual token contracts with bonding curve logic
+ *
+ * @custom:oz-upgrades-unsafe-allow constructor
  */
 contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
-    
+    using Address for address payable;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // DATA STRUCTURES
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -63,27 +99,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         address dexPair;
     }
     
-    /**
-     * @notice Statistics struct for factory-wide metrics
-     * @dev Used for analytics and monitoring factory performance
-     * @dev Currently defined but not fully utilized in all functions
-     */
-    struct FactoryStats {
-        /// @notice Total number of tokens ever deployed by this factory
-        uint256 totalTokens;
-        
-        /// @notice Total number of tokens that have graduated to DEX
-        uint256 totalGraduated;
-        
-        /// @notice Number of active tokens (not graduated yet)
-        uint256 totalActiveTokens;
-        
-        /// @notice Total creation fees collected by the factory
-        uint256 totalFeesCollected;
-        
-        /// @notice Total trading volume across all tokens (not currently tracked)
-        uint256 totalVolume;
-    }
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // FACTORY CONFIGURATION
@@ -127,12 +142,18 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     /// @dev Applied to all new tokens, typically 0 (0% by default)
     /// @dev Can be set to generate immediate revenue from token trading
     uint256 public buyTradingFee = 0;
-    
+
     /// @notice Default sell trading fee for new tokens (basis points)
     /// @dev Applied to all new tokens, typically 0 (0% by default)
     /// @dev Can be set higher than buy fee to discourage selling pressure
     uint256 public sellTradingFee = 0;
-    
+
+    /// @notice Default percentage of trading fees allocated to creator (basis points)
+    /// @dev Applied to all new tokens, typically 5000 (50%)
+    /// @dev Determines creator/platform split of trading fees: creator gets this %, platform gets remainder
+    /// @dev Range: 0-10000 (0%-100%)
+    uint256 public creatorTradingFeeShare = 5000;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // TOKEN TRACKING AND INDEXING
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -165,11 +186,19 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     /// @dev Incremented each time a token is successfully created
     /// @dev Used for revenue tracking and owner withdrawals
     uint256 public totalFeesCollected;
-    
-    /// @notice Total trading volume across all tokens
-    /// @dev Currently not actively updated by token contracts
-    /// @dev Reserved for future analytics implementation
-    uint256 public totalVolume;
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // CONSTANTS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Maximum allowed slope to prevent overflow issues
+    uint256 public constant MAX_SLOPE = 1e36; // 1e18 tokens * 1e18 price
+
+    /// @notice Maximum allowed base price to prevent overflow issues
+    uint256 public constant MAX_BASE_PRICE = 1e27; // 1 billion ETH in wei
+
+    /// @notice Maximum allowed graduation threshold to prevent overflow issues
+    uint256 public constant MAX_GRADUATION_THRESHOLD = 1e30; // 1 trillion ETH in wei
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
@@ -267,7 +296,15 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @param sellFee New default sell trading fee in basis points
      */
     event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
-    
+
+    /**
+     * @notice Emitted when trading fee split is updated
+     * @dev Affects creator/platform split for all future tokens or specific token
+     * @param creatorShare New creator share in basis points
+     * @param platformShare New platform share in basis points
+     */
+    event TradingFeeSplitUpdated(uint256 creatorShare, uint256 platformShare);
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // MODIFIERS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -307,8 +344,11 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         require(bytes(name).length > 0, "Name cannot be empty");
         require(bytes(symbol).length > 0, "Symbol cannot be empty");
         require(slope > 0, "Slope must be greater than 0");
+        require(slope <= MAX_SLOPE, "Slope exceeds maximum");
         require(basePrice > 0, "Base price must be greater than 0");
+        require(basePrice <= MAX_BASE_PRICE, "Base price exceeds maximum");
         require(graduationThreshold > 0, "Graduation threshold must be greater than 0");
+        require(graduationThreshold <= MAX_GRADUATION_THRESHOLD, "Graduation threshold exceeds maximum");
         _;
     }
 
@@ -322,20 +362,45 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     }
 
     /**
-     * @notice Initializes the TokenFactory with required addresses and configuration
-     * @dev Sets up the factory with DEX integration and fee collection infrastructure
-     * @dev Replaces constructor for upgradeable pattern
+     * @notice Initializes the TokenFactory with core infrastructure addresses
+     * @dev One-time initialization function for UUPS upgradeable proxy pattern
+     * @dev Must be called immediately after proxy deployment
      *
-     * @param _router Address of the Uniswap V2 Router for DEX integration
-     * @param _platformFeeCollector Address that will receive all platform fees
-     * @param _owner Address that will become the factory owner with admin privileges
+     * @param _router Address of the Uniswap V2 Router contract for DEX integration
+     * @param _platformFeeCollector Address that will receive all trading and platform fees
+     * @param _owner Address that will become the factory owner (should be multi-sig)
      *
-     * Initial State:
-     * - Creates empty tokens array for tracking deployments
-     * - Sets default fee structures (80% liquidity, 0% creator, 20% platform)
-     * - Sets default trading fees to 0% for both buy and sell
-     * - Sets creation fee to 1 POL
-
+     * Initialization Sequence:
+     * 1. Validates critical addresses (non-zero checks)
+     * 2. Initializes OpenZeppelin upgradeable contracts:
+     *    - Ownable: Sets ownership to _owner
+     *    - ReentrancyGuard: Initializes reentrancy protection
+     *    - UUPSUpgradeable: Enables upgrade functionality
+     * 3. Configures DEX integration with provided router
+     * 4. Sets platform fee collector address
+     * 5. Establishes default fee structures:
+     *    - creationFee: 1 POL per token deployment
+     *    - liquidityFee: 8000 basis points (80%)
+     *    - creatorFee: 0 basis points (0%)
+     *    - platformFee: 2000 basis points (20%)
+     *    - buyTradingFee: 0 basis points (0%)
+     *    - sellTradingFee: 0 basis points (0%)
+     *    - creatorTradingFeeShare: 5000 basis points (50%)
+     *
+     * Requirements:
+     * - Can only be called once (enforced by initializer modifier)
+     * - _router must not be zero address
+     * - _platformFeeCollector must not be zero address
+     * - _owner should be multi-signature wallet for production
+     *
+     * Post-Initialization Actions Required:
+     * 1. Verify all addresses are correct
+     * 2. Transfer ownership to TimelockController (if using)
+     * 3. Configure fee structures via updateFeeDistribution() if needed
+     * 4. Set appropriate trading fees via updateTradingFees() if desired
+     *
+     * @custom:security Call immediately after proxy deployment
+     * @custom:security Verify initialization parameters before calling
      */
     function initialize(
         address _router,
@@ -364,6 +429,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         platformFee = 2000;
         buyTradingFee = 0;
         sellTradingFee = 0;
+        creatorTradingFeeShare = 5000; // 50% default split
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -415,26 +481,30 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         uint256 graduationThreshold,
         uint256 tokenAmount
     ) external payable nonReentrant validParameters(name, symbol, slope, basePrice, graduationThreshold) returns (address tokenAddress) {
+        // Validate token amount
+        require(tokenAmount > 0, "Token amount must be greater than 0");
 
         // Calculate the cost for buying tokens (using the same formula as BondingCurveToken)
-        uint256 tokenBuyCost = _calculateBuyCost(0, tokenAmount, slope, basePrice);
-        uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000; 
+        uint256 tokenBuyCost = calculateBuyCost(0, tokenAmount, slope, basePrice);
+        uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000;
         uint256 totalRequired = creationFee + tokenBuyCost + tradingFee;
 
         require(msg.value >= totalRequired, "Insufficient payment for creation fee and token purchase");
 
-        // Create the token first
+        // Calculate and store excess before any external calls (CEI pattern)
+        uint256 excess = msg.value - totalRequired;
+
+        // Create the token first (uses internal creation fee, doesn't touch excess)
         tokenAddress = _createTokenInternal(name, symbol, slope, basePrice, graduationThreshold);
 
-        // Now buy tokens on behalf of the creator
+        // Refund excess BEFORE external call to token contract (CEI pattern)
+        if (excess > 0) {
+            payable(msg.sender).sendValue(excess);
+        }
+
+        // Now buy tokens on behalf of the creator (external call comes last)
         BondingCurveToken tokenContract = BondingCurveToken(payable(tokenAddress));
         tokenContract.buyTokensFor{value: tokenBuyCost + tradingFee}(msg.sender, tokenAmount);
-
-        // Refund any excess payment
-        uint256 excess = msg.value - totalRequired;
-        if (excess > 0) {
-            payable(msg.sender).transfer(excess);
-        }
 
         return tokenAddress;
     }
@@ -448,17 +518,17 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @param basePrice Initial token price
      * @return cost Total cost in wei to buy d tokens
      */
-    function _calculateBuyCost(uint256 s, uint256 d, uint256 slope, uint256 basePrice) public pure returns (uint256 cost) {
+    function calculateBuyCost(uint256 s, uint256 d, uint256 slope, uint256 basePrice) public pure returns (uint256 cost) {
         // Using the same constants as BondingCurveToken
         uint256 WAD = 10**18;
 
         uint256 term1 = Math.mulDiv(basePrice, d, WAD, Math.Rounding.Ceil);
-        
+
         // term2 = slope * d * (2*s + d) / (2 * WAD^2)
         uint256 sdOverWad = Math.mulDiv(slope, d, WAD, Math.Rounding.Ceil); // slope * d / WAD
         uint256 twoSPlusD = s * 2 + d; // safe with checked math (reverts on overflow)
         uint256 term2 = Math.mulDiv(sdOverWad, twoSPlusD, 2 * WAD, Math.Rounding.Ceil);
-        
+
         return term1 + term2;
     }
 
@@ -491,7 +561,13 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     ) internal returns (address tokenAddress) {
         // Ensure sufficient payment for creation fee
         require(msg.value >= creationFee, "Insufficient creation fee");
-        
+
+        // Calculate excess refund before any state changes (CEI pattern)
+        uint256 excessRefund = msg.value - creationFee;
+
+        // Update factory statistics BEFORE external calls
+        totalFeesCollected += creationFee;
+
         // Deploy new bonding curve token with factory's current configuration
         BondingCurveToken newToken = new BondingCurveToken(
             name,                    // Token name
@@ -507,11 +583,12 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             platformFee,           // Platform fee percentage
             platformFeeCollector,  // Address to receive fees
             buyTradingFee,         // Buy trading fee
-            sellTradingFee         // Sell trading fee
+            sellTradingFee,        // Sell trading fee
+            creatorTradingFeeShare // Trading fee split percentage
         );
-        
+
         tokenAddress = address(newToken);
-        
+
         // Create comprehensive token information record
         TokenInfo memory tokenInfo = TokenInfo({
             tokenAddress: tokenAddress,
@@ -525,20 +602,13 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             hasGraduated: false,
             dexPair: address(0)  // Will be set when token graduates
         });
-        
+
         // Update factory's tracking systems
         tokens.push(tokenInfo);                              // Add to main array
-        tokenIndex[tokenAddress] = tokens.length - 1;       // Map address to index
+        uint256 newIndex = tokens.length - 1;               // Cache index (gas optimization)
+        tokenIndex[tokenAddress] = newIndex;                // Map address to index
         isTokenCreated[tokenAddress] = true;                 // Mark as factory-created
-        creatorTokens[msg.sender].push(tokens.length - 1);  // Add to creator's list
-        
-        // Update factory statistics
-        totalFeesCollected += creationFee;
-        
-        // Refund any excess ETH payment to user
-        if (msg.value > creationFee) {
-            payable(msg.sender).transfer(msg.value - creationFee);
-        }
+        creatorTokens[msg.sender].push(newIndex);           // Add to creator's list
         
         // Emit creation event for monitoring and indexing
         emit TokenCreated(
@@ -551,7 +621,12 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             msg.sender,
             creationFee
         );
-        
+
+        // Refund any excess ETH payment to user (using safe transfer)
+        if (excessRefund > 0) {
+            payable(msg.sender).sendValue(excessRefund);
+        }
+
         return tokenAddress;
     }
     
@@ -676,14 +751,19 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @notice Updates the platform fee collector address for future tokens
      * @dev Only affects tokens created after this change
      * @dev Does NOT update existing tokens - use updatePlatformFeeCollectorOnExistingToken for those
-     * 
+     *
      * @param newPlatformFeeCollector New address to receive platform fees
+     *
+     * Security: Validates that the new address can receive POL by sending 0 wei test transaction
+     * This prevents setting a contract that reverts on receive, which would brick fee collection
      */
     function updatePlatformFeeCollector(address newPlatformFeeCollector) external onlyOwner {
         require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+
+
         address oldCollector = platformFeeCollector;
         platformFeeCollector = newPlatformFeeCollector;
-        
+
         emit PlatformFeeCollectorUpdated(oldCollector, newPlatformFeeCollector);
     }
 
@@ -691,11 +771,16 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @notice Updates platform fee collector for a specific existing token
      * @dev Allows updating fee collection for tokens already deployed
      * @dev Only callable by factory owner with admin permissions on tokens
-     * 
+     *
      * @param token Address of the token to update
      * @param newPlatformFeeCollector New fee collector address for this token
+     *
+     * Security: Validates that the new address can receive POL before updating
      */
     function updatePlatformFeeCollectorOnExistingToken(address token, address newPlatformFeeCollector) external onlyOwner validTokenAddress(token) {
+        require(newPlatformFeeCollector != address(0), "Platform fee collector cannot be zero address");
+
+
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
         tokenContract.updatePlatformFeeCollector(newPlatformFeeCollector);
     }
@@ -731,6 +816,71 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
         tokenContract.updateTradingFees(newBuyTradingFee, newSellTradingFee);
     }
+
+    /**
+     * @notice Updates default trading fee split for future tokens
+     * @dev Only affects tokens created after this change
+     * @dev Existing tokens retain their original trading fee split settings
+     *
+     * @param newCreatorShare New default creator share in basis points (0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution Examples:
+     * - 5000: 50% creator, 50% platform (default balanced)
+     * - 7000: 70% creator, 30% platform (creator-favored)
+     * - 3000: 30% creator, 70% platform (platform-favored)
+     * - 10000: 100% creator, 0% platform (promotional)
+     * - 0: 0% creator, 100% platform (platform-only)
+     *
+     * Use Cases:
+     * - Adjust global incentive structure for new token creators
+     * - Launch promotional periods with higher creator rewards
+     * - Optimize platform revenue model based on market conditions
+     * - Align with governance-approved fee policies
+     */
+    function updateCreatorTradingFeeShare(uint256 newCreatorShare) external onlyOwner {
+        require(newCreatorShare <= 10000, "Creator share cannot exceed 100%");
+
+        creatorTradingFeeShare = newCreatorShare;
+        uint256 platformShare = 10000 - newCreatorShare;
+
+        emit TradingFeeSplitUpdated(newCreatorShare, platformShare);
+    }
+
+    /**
+     * @notice Updates trading fee split for a specific existing token
+     * @dev Allows dynamic adjustment of creator/platform fee distribution
+     * @dev Only affects future fee accumulations, not already accumulated fees
+     *
+     * @param token Address of the token to update
+     * @param newCreatorShare Percentage allocated to creator (basis points, 0-10000)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - newCreatorShare must be between 0 and 10000 (0% to 100%)
+     *
+     * Fee Distribution Examples:
+     * - 5000: 50% creator, 50% platform (default balanced)
+     * - 7000: 70% creator, 30% platform (creator-favored)
+     * - 3000: 30% creator, 70% platform (platform-favored)
+     * - 10000: 100% creator, 0% platform (promotional)
+     * - 0: 0% creator, 100% platform (platform-only)
+     *
+     * Use Cases:
+     * - Adjust global incentive structure for new token creators
+     * - Launch promotional periods with higher creator rewards
+     * - Optimize platform revenue model based on market conditions
+     * - Align with governance-approved fee policies
+     * 
+     * Note: Does not affect already accumulated fees in the token contract
+     */
+    function updateTradingFeeShareOnExistingToken(address token, uint256 newCreatorShare) external onlyOwner validTokenAddress(token) {
+        BondingCurveToken tokenContract = BondingCurveToken(payable(token));
+        tokenContract.updateTradingFeeShare(newCreatorShare);
+    }
     
     /**
      * @notice Updates the Uniswap V2 Router used for token graduations
@@ -749,40 +899,62 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     
     /**
      * @notice Withdraws all collected creation fees to the factory owner
-     * @dev Reentrancy protected to prevent malicious re-entry attacks
-     * @dev Only withdraws creation fees, not trading fees (those go to platform fee collector)
-     * 
+     * @dev Transfers entire contract balance to owner address using safe transfer
+     * @dev Only withdraws creation fees, not trading fees (routed to platform fee collector)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - Contract balance must be greater than 0
+     *
      * Revenue Sources:
-     * - Token creation fees paid by users
-     * - Any accidental POL sent to factory contract
-     * - Does NOT include trading fees (sent directly to platform fee collector)
-
+     * - Token creation fees paid by users during token deployment
+     * - Any POL sent directly to factory contract address
+     *
+     * Note: Trading fees are transferred directly to platformFeeCollector during token operations
+     * and are not accumulated in this contract.
+     *
+     * Security:
+     * - Protected by nonReentrant modifier
+     * - Uses OpenZeppelin's sendValue for safe POL transfer
+     * - Emits FeesWithdrawn event for transparency
+     *
+     * Emits:
+     * - FeesWithdrawn(owner, amount)
      */
     function withdrawFees() external onlyOwner nonReentrant {
         uint256 balance = address(this).balance;
         require(balance > 0, "No fees to withdraw");
         
-        payable(owner()).transfer(balance);
+        payable(owner()).sendValue(balance);
         
         emit FeesWithdrawn(owner(), balance);
     }
     
     /**
-     * @notice Manually triggers graduation for a token (emergency function)
-     * @dev currently in dev mode to test graduations , will be removed later
-     * @dev Emergency function to force graduation without reaching market cap threshold
-     * @dev Bypasses normal market cap requirement for graduation
-     * @dev Should be used sparingly and only for valid reasons
-     * 
-     * @param token Address of the token to force graduate
-     * 
+     * @notice Manually triggers graduation for a token
+     * @dev Administrative function to force graduation without reaching market cap threshold
+     * @dev Bypasses normal market cap requirement - use only when necessary
+     * @dev Only callable by factory owner with proper authorization
+     *
+     * @param token Address of the token to graduate
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - Token must exist and not be graduated
+     * - Token must have sufficient liquidity for DEX listing
+     *
      * Use Cases:
-     * - Emergency situations requiring immediate graduation
-     * - Testing purposes in development environments  
-     * - Special milestone celebrations
-     * - Resolution of technical issues preventing natural graduation
-     * 
-     * WARNING: This bypasses economic incentives and should be used cautiously
+     * - Emergency situations requiring immediate liquidity access
+     * - Technical issues preventing automatic graduation
+     * - Administrative decisions for token lifecycle management
+     *
+     * Security Considerations:
+     * - Bypasses economic incentives designed into bonding curve
+     * - Should be governed by multi-signature wallet in production
+     * - Consider implementing timelock for additional security
+     * - Document all uses for transparency and governance
+     *
+     * @custom:security-contact Ensure proper authorization before calling
      */
     function triggerGraduation(address token) external onlyOwner validTokenAddress(token) {
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));

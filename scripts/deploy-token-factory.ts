@@ -1,4 +1,5 @@
 import hre from "hardhat";
+import { encodeFunctionData } from "viem";
 
 // Network configuration for Uniswap V2 Router addresses
 const NETWORK_CONFIG = {
@@ -71,9 +72,9 @@ async function main() {
   console.log(`   Platform Fee Collector: ${platformFeeCollector}`);
   console.log(`   Owner: ${owner}`);
 
-  // Deploy the factory
-  console.log("\n🏗️  Deploying TokenFactory...");
-  
+  // Deploy the upgradeable factory (UUPS pattern)
+  console.log("\n🏗️  Deploying Upgradeable TokenFactory (UUPS)...");
+
   try {
     // For testnets, use higher gas limits to handle large contract deployments
     const gasConfig = chainId === 80002 || chainId === 11155111 ? {
@@ -81,13 +82,44 @@ async function main() {
       gasPrice: 30000000000n, // 30 gwei
     } : {};
 
-    const tokenFactory = await viem.deployContract("TokenFactory", [
-      router as `0x${string}`,
-      platformFeeCollector as `0x${string}`, 
-      owner as `0x${string}`
-    ], gasConfig);
+    // Step 1: Deploy implementation contract
+    console.log("   📦 Deploying TokenFactory implementation...");
+    const tokenFactoryImpl = await viem.deployContract("TokenFactory", [], gasConfig);
+    console.log(`   ✅ Implementation deployed to: ${tokenFactoryImpl.address}`);
 
-    console.log(`✅ TokenFactory deployed to: ${tokenFactory.address}`);
+    // Step 2: Encode initialize function call
+    const initializeData = encodeFunctionData({
+      abi: [{
+        type: "function",
+        name: "initialize",
+        inputs: [
+          { name: "_router", type: "address" },
+          { name: "_platformFeeCollector", type: "address" },
+          { name: "_owner", type: "address" }
+        ]
+      }],
+      functionName: "initialize",
+      args: [router as `0x${string}`, platformFeeCollector as `0x${string}`, owner as `0x${string}`]
+    });
+
+    // Step 3: Deploy proxy
+    console.log("   📦 Deploying ERC1967 Proxy...");
+    const proxy = await viem.deployContract("TokenFactoryProxy", [
+      tokenFactoryImpl.address,
+      initializeData as `0x${string}`
+    ], gasConfig);
+    console.log(`   ✅ Proxy deployed to: ${proxy.address}`);
+
+    // Step 4: Connect to proxy as TokenFactory
+    const publicClient = await viem.getPublicClient();
+    const tokenFactory = await viem.getContractAt(
+      "TokenFactory",
+      proxy.address as `0x${string}`,
+      { client: publicClient }
+    );
+
+    console.log(`\n✅ TokenFactory (Proxy) deployed to: ${tokenFactory.address}`);
+    console.log(`✅ Implementation address: ${tokenFactoryImpl.address}`);
     console.log(`🔍 View on explorer: ${networkConfig.scanUrl}/address/${tokenFactory.address}`);
 
     // Verify deployment by calling basic functions
@@ -131,16 +163,19 @@ async function main() {
     console.log("=======================================");
     
     console.log("\n📋 Summary:");
-    console.log(`   Contract Address: ${tokenFactory.address}`);
+    console.log(`   Proxy Address: ${tokenFactory.address}`);
+    console.log(`   Implementation Address: ${tokenFactoryImpl.address}`);
     console.log(`   Network: ${networkConfig.name}`);
-    console.log(`   Explorer: ${networkConfig.scanUrl}/address/${tokenFactory.address}`);
+    console.log(`   Proxy Explorer: ${networkConfig.scanUrl}/address/${tokenFactory.address}`);
+    console.log(`   Implementation Explorer: ${networkConfig.scanUrl}/address/${tokenFactoryImpl.address}`);
     
     console.log("\n🔄 Next Steps:");
-    console.log("   1. Verify the contract on block explorer");
+    console.log("   1. Verify both proxy and implementation contracts on block explorer");
     console.log("   2. Test token creation functionality");
     console.log("   3. Set up frontend integration");
     console.log("   4. Configure monitoring and analytics");
-    console.log("   5. Update platform fee collector if needed");
+    console.log("   5. Transfer ownership to multi-sig wallet for production");
+    console.log("   6. Test upgrade functionality (only after thorough testing)");
     
     if (chainId === 31337) {
       console.log("\n🛠️  Local Development Notes:");
@@ -150,7 +185,8 @@ async function main() {
     }
     
     return {
-      factoryAddress: tokenFactory.address,
+      proxyAddress: tokenFactory.address,
+      implementationAddress: tokenFactoryImpl.address,
       factory: tokenFactory,
       networkConfig,
       deploymentInfo: {

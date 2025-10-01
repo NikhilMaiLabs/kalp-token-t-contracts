@@ -7,6 +7,7 @@ import "../contracts/BondingCurveToken.sol";
 import "../contracts/mocks/MockUniswapV2Router.sol";
 import "../contracts/mocks/MockUniswapV2Factory.sol";
 import "../contracts/mocks/MockWETH.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
  * @title TokenTradingTest
@@ -46,13 +47,23 @@ contract TokenTradingTest is Test {
         MockWETH mockWETH = new MockWETH();
         MockUniswapV2Factory mockUniswapFactory = new MockUniswapV2Factory();
         MockUniswapV2Router mockRouter = new MockUniswapV2Router(
-            address(mockUniswapFactory), 
+            address(mockUniswapFactory),
             address(mockWETH)
         );
-        
-        // Deploy factory with mock router
-        vm.prank(owner);
-        factory = new TokenFactory(address(mockRouter), platformFeeCollector, owner);
+
+        // Deploy factory implementation
+        TokenFactory implementation = new TokenFactory();
+
+        // Deploy proxy and initialize
+        bytes memory initData = abi.encodeWithSelector(
+            TokenFactory.initialize.selector,
+            address(mockRouter),
+            platformFeeCollector,
+            owner
+        );
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        factory = TokenFactory(payable(address(proxy)));
         
         // Create test token
         vm.prank(tokenCreator);
@@ -152,21 +163,32 @@ contract TokenTradingTest is Test {
         // Set 5% buy fee
         vm.prank(address(factory));
         token.updateTradingFees(500, 0);
-        
+
         uint256 tokensToBuy = 5;
         uint256 cost = token.getBuyPrice(tokensToBuy);
         uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
         uint256 totalCost = cost + tradingFee;
-        uint256 initialPlatformBalance = platformFeeCollector.balance;
-        
+
+        // Calculate expected fee split (50% creator, 50% platform by default)
+        uint256 expectedCreatorFee = (tradingFee * token.creatorTradingFeeShare()) / 10000;
+        uint256 expectedPlatformFee = tradingFee - expectedCreatorFee;
+
         vm.prank(buyer);
         token.buyTokens{value: totalCost}(tokensToBuy);
-        
+
         assertEq(token.balanceOf(buyer), tokensToBuy, "Buyer should receive tokens");
+
+        // Verify fees are accumulated, not transferred
+        assertEq(token.accumulatedCreatorFees(), expectedCreatorFee, "Creator fees should be accumulated");
+        assertEq(token.accumulatedPlatformFees(), expectedPlatformFee, "Platform fees should be accumulated");
+
+        // Claim platform fees and verify transfer
+        uint256 initialPlatformBalance = platformFeeCollector.balance;
+        token.claimPlatformTradingFees();
         assertEq(
-            platformFeeCollector.balance, 
-            initialPlatformBalance + tradingFee, 
-            "Platform should receive fee"
+            platformFeeCollector.balance,
+            initialPlatformBalance + expectedPlatformFee,
+            "Platform should receive fee after claim"
         );
     }
     
@@ -217,16 +239,27 @@ contract TokenTradingTest is Test {
         uint256 fee = (refund * 300) / 10000;
         uint256 netRefund = refund - fee;
         uint256 initialBalance = buyer.balance;
-        uint256 initialPlatformBalance = platformFeeCollector.balance;
-        
+
+        // Calculate expected fee split
+        uint256 expectedCreatorFee = (fee * token.creatorTradingFeeShare()) / 10000;
+        uint256 expectedPlatformFee = fee - expectedCreatorFee;
+
         vm.prank(buyer);
         token.sellTokens(tokensToSell, 0);
-        
+
         assertEq(buyer.balance, initialBalance + netRefund, "Should receive net refund");
+
+        // Verify fees are accumulated
+        assertEq(token.accumulatedCreatorFees(), expectedCreatorFee, "Creator fees should be accumulated");
+        assertEq(token.accumulatedPlatformFees(), expectedPlatformFee, "Platform fees should be accumulated");
+
+        // Claim and verify platform fees
+        uint256 initialPlatformBalance = platformFeeCollector.balance;
+        token.claimPlatformTradingFees();
         assertEq(
             platformFeeCollector.balance,
-            initialPlatformBalance + fee,
-            "Platform should receive sell fee"
+            initialPlatformBalance + expectedPlatformFee,
+            "Platform should receive sell fee after claim"
         );
     }
     
@@ -254,14 +287,20 @@ contract TokenTradingTest is Test {
     }
     
     function test_sellMoreThanBalanceReverts() public {
-        // Buy 5 tokens
+        // Buy 5 tokens as buyer
         uint256 cost = token.getBuyPrice(5);
+        uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
+        uint256 totalCost = cost + tradingFee;
+
         vm.prank(buyer);
-        token.buyTokens{value: cost + (cost * token.buyTradingFee() / 10000)}(5);
-        
-        // Try to sell 6 tokens
+        token.buyTokens{value: totalCost}(5);
+
+        // Verify buyer has 5 tokens
+        assertEq(token.balanceOf(buyer), 5, "Buyer should have 5 tokens");
+
+        // Try to sell 6 tokens (more than balance)
         vm.prank(buyer);
-        vm.expectRevert("Insufficient token balance");
+        vm.expectRevert(abi.encodeWithSelector(BondingCurveToken.InsufficientTokenBalance.selector, 5, 6));
         token.sellTokens(6, 0);
     }
     
@@ -302,7 +341,7 @@ contract TokenTradingTest is Test {
         uint256 totalCost = cost + tradingFee;
         
         vm.prank(buyer);
-        vm.expectRevert("BlackList: Recipient account is blocked");
+        vm.expectRevert(abi.encodeWithSelector(BondingCurveToken.BlacklistedAccount.selector, buyer));
         token.buyTokens{value: totalCost}(5);
     }
     
@@ -320,7 +359,7 @@ contract TokenTradingTest is Test {
         token.blockAccount(buyer);
         
         vm.prank(buyer);
-        vm.expectRevert("BlackList: Sender account is blocked");
+        vm.expectRevert(abi.encodeWithSelector(BondingCurveToken.BlacklistedAccount.selector, buyer));
         token.sellTokens(5, 0);
     }
     
@@ -395,44 +434,71 @@ contract TokenTradingTest is Test {
     }
     
     function test_manualGraduation() public {
+        // Buy some tokens first (graduation requires supply > 0)
+        uint256 tokensToBuy = 10;
+        uint256 cost = token.getBuyPrice(tokensToBuy);
+        uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
+        uint256 totalCost = cost + tradingFee;
+
+        vm.prank(buyer);
+        token.buyTokens{value: totalCost}(tokensToBuy);
+
         // Force graduation
         vm.prank(address(factory));
         token.triggerGraduation();
-        
+
         assertTrue(token.hasGraduated(), "Token should be graduated");
         assertTrue(token.dexPool() != address(0), "DEX pool should be created");
     }
-    
+
     function test_manualGraduationRevertsWhenAlreadyGraduated() public {
+        // Buy some tokens first
+        uint256 tokensToBuy = 10;
+        uint256 cost = token.getBuyPrice(tokensToBuy);
+        uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
+        uint256 totalCost = cost + tradingFee;
+
+        vm.prank(buyer);
+        token.buyTokens{value: totalCost}(tokensToBuy);
+
         // First graduate the token
         vm.prank(address(factory));
         token.triggerGraduation();
-        
+
         // Try to graduate again
         vm.prank(address(factory));
-        vm.expectRevert("Token has already graduated");
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
         token.triggerGraduation();
     }
     
     function test_manualGraduationOnlyFactory() public {
         // Try to trigger graduation as non-factory
         vm.prank(buyer);
-        vm.expectRevert("Only factory can call this function");
+        vm.expectRevert(BondingCurveToken.OnlyFactory.selector);
         token.triggerGraduation();
     }
     
     function test_tradingDisabledAfterGraduation() public {
+        // Buy some tokens first
+        uint256 tokensToBuy = 10;
+        uint256 cost = token.getBuyPrice(tokensToBuy);
+        uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
+        uint256 totalCost = cost + tradingFee;
+
+        vm.prank(buyer);
+        token.buyTokens{value: totalCost}(tokensToBuy);
+
         // Graduate token
         vm.prank(address(factory));
         token.triggerGraduation();
-        
-        uint256 cost = token.getBuyPrice(5);
-        uint256 tradingFee = (cost * token.buyTradingFee()) / 10000;
-        uint256 totalCost = cost + tradingFee;
-        
+
+        uint256 cost2 = token.getBuyPrice(5);
+        uint256 tradingFee2 = (cost2 * token.buyTradingFee()) / 10000;
+        uint256 totalCost2 = cost2 + tradingFee2;
+
         vm.prank(buyer);
-        vm.expectRevert("Token has already graduated");
-        token.buyTokens{value: totalCost}(5);
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
+        token.buyTokens{value: totalCost2}(5);
     }
     
     function test_sellDisabledAfterGraduation() public {
@@ -451,7 +517,7 @@ contract TokenTradingTest is Test {
         
         // Try to sell tokens after graduation
         vm.prank(buyer);
-        vm.expectRevert("Token has already graduated");
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
         token.sellTokens(tokensToBuy, 0);
     }
     
