@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./BondingCurveToken.sol";
 
 /**
@@ -18,7 +20,7 @@ import "./BondingCurveToken.sol";
  * - Provide administrative functions for token management
  * - Handle creation fees and revenue collection
  */
-contract TokenFactory is Ownable, ReentrancyGuard {
+contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // DATA STRUCTURES
@@ -311,17 +313,23 @@ contract TokenFactory is Ownable, ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // CONSTRUCTOR
+    // INITIALIZATION
     // ═══════════════════════════════════════════════════════════════════════════════
-    
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Initializes the TokenFactory with required addresses and configuration
      * @dev Sets up the factory with DEX integration and fee collection infrastructure
-     * 
+     * @dev Replaces constructor for upgradeable pattern
+     *
      * @param _router Address of the Uniswap V2 Router for DEX integration
      * @param _platformFeeCollector Address that will receive all platform fees
      * @param _owner Address that will become the factory owner with admin privileges
-     * 
+     *
      * Initial State:
      * - Creates empty tokens array for tracking deployments
      * - Sets default fee structures (80% liquidity, 0% creator, 20% platform)
@@ -329,17 +337,33 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * - Sets creation fee to 1 POL
 
      */
-    constructor(address _router, address _platformFeeCollector, address _owner) Ownable(_owner) {
+    function initialize(
+        address _router,
+        address _platformFeeCollector,
+        address _owner
+    ) public initializer {
         // Validate critical addresses
         require(_router != address(0), "Router cannot be zero address");
         require(_platformFeeCollector != address(0), "Platform fee collector cannot be zero address");
-        
+
+        // Initialize inherited contracts
+        __Ownable_init(_owner);
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
         // Initialize DEX integration
         router = _router;
-        
+
         // Initialize fee collection
         platformFeeCollector = _platformFeeCollector;
-        
+
+        // Initialize default fees
+        creationFee = 1 ether;
+        liquidityFee = 8000;
+        creatorFee = 0;
+        platformFee = 2000;
+        buyTradingFee = 0;
+        sellTradingFee = 0;
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -801,16 +825,40 @@ contract TokenFactory is Ownable, ReentrancyGuard {
      * @notice Fallback function for handling unexpected calls
      * @dev Called when contract is called with data that doesn't match any function
      * @dev Also accepts POL to ensure contract doesn't reject unexpected payments
-     * 
+     *
      * Behavior:
      * - Accepts POL sent with invalid function calls
      * - Does not execute any logic
      * - Prevents accidental POL loss from misformed transactions
-     * 
+     *
      * Security Note:
      * - Does not perform any state changes
      * - Simply accepts POL if provided
      * - All received POL can be withdrawn by factory owner
      */
     fallback() external payable {}
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // UPGRADE AUTHORIZATION
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Authorizes contract upgrades
+     * @dev Only the contract owner can authorize upgrades (UUPS pattern)
+     * @dev This function is required by the UUPSUpgradeable contract
+     *
+     * @param newImplementation Address of the new implementation contract
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // STORAGE GAP
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
 }

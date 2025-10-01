@@ -1,5 +1,5 @@
 import hre from "hardhat";
-import { parseEther, formatEther, keccak256, decodeEventLog, toHex } from "viem";
+import { parseEther, formatEther, keccak256, decodeEventLog, toHex, encodeFunctionData } from "viem";
 import * as dotenv from "dotenv";
 
 // Load environment variables
@@ -333,19 +333,48 @@ class LocalDeployAndInteractManager {
     console.log(`   Platform Fee Collector: ${platformFeeCollector}`);
     console.log(`   Owner: ${owner}`);
 
-    console.log("   Deploying TokenFactory...");
-    this.tokenFactory = await this.viem.deployContract("TokenFactory", [
-      this.router2.address,
-      platformFeeCollector as `0x${string}`, 
-      owner as `0x${string}`
+    console.log("   Deploying TokenFactory Implementation...");
+    const tokenFactoryImpl = await this.viem.deployContract("TokenFactory");
+    console.log(`   ✅ TokenFactory Implementation deployed to: ${tokenFactoryImpl.address}`);
+
+    console.log("   Deploying ERC1967Proxy for TokenFactory...");
+
+    // Encode the initialize function call
+    const initializeData = encodeFunctionData({
+      abi: [{
+        type: "function",
+        name: "initialize",
+        inputs: [
+          { name: "_router", type: "address" },
+          { name: "_platformFeeCollector", type: "address" },
+          { name: "_owner", type: "address" }
+        ]
+      }],
+      functionName: "initialize",
+      args: [this.router2.address, platformFeeCollector as `0x${string}`, owner as `0x${string}`]
+    });
+
+    // Deploy the proxy
+    const proxy = await this.viem.deployContract("TokenFactoryProxy", [
+      tokenFactoryImpl.address,
+      initializeData as `0x${string}`
     ]);
 
-    console.log(`   ✅ TokenFactory deployed to: ${this.tokenFactory.address}`);
-    
+    console.log(`   ✅ ERC1967Proxy deployed to: ${proxy.address}`);
+
+    // Connect to the proxy as TokenFactory
+    this.tokenFactory = await this.viem.getContractAt(
+      "TokenFactory",
+      proxy.address as `0x${string}`,
+      { client: this.client }
+    );
+
+    console.log(`   ✅ TokenFactory Proxy Address: ${this.tokenFactory.address}`);
     console.log("   ✅ All contracts deployed and initialized");
-    
+
     return {
       factoryAddress: this.tokenFactory.address,
+      factoryImplementation: tokenFactoryImpl.address,
       routerAddress: this.router2.address,
       v2FactoryAddress: this.v2Factory.address,
       wethAddress: this.weth.address,
@@ -844,7 +873,8 @@ async function main() {
     console.log("=".repeat(60));
     
     console.log("\n📋 Summary:");
-    console.log(`   Factory Address: ${deploymentInfo.factoryAddress}`);
+    console.log(`   Factory Proxy Address: ${deploymentInfo.factoryAddress}`);
+    console.log(`   Factory Implementation: ${deploymentInfo.factoryImplementation}`);
     console.log(`   Token 1 Address: ${token1Address}`);
     console.log(`   Token 2 Address: ${token2Address}`);
     console.log(`   Network: Local Hardhat`);
