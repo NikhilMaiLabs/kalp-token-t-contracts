@@ -184,7 +184,10 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     event TradingFeesUpdated(uint256 buyFee, uint256 sellFee);
     
     /// @notice Emitted when the instantaneous price has changed due to supply update
-    event PriceUpdated(uint256 newPrice, uint256 newSupply);
+    /// @param newPrice The new current price per token in wei
+    /// @param newSupply The new total supply after the transaction
+    /// @param timestamp Block timestamp when price changed
+    event PriceUpdated(uint256 indexed newPrice, uint256 newSupply, uint256 timestamp);
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
@@ -508,7 +511,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Emit events for tracking
         emit TokensPurchased(msg.sender, amount, cost, s + amount);
-        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount, block.timestamp);
         
         // Refund any excess POL sent by the user
         uint256 refund = msg.value - totalCost;
@@ -569,7 +572,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
 
         // Emit events for tracking (show recipient as the buyer)
         emit TokensPurchased(recipient, amount, cost, s + amount);
-        emit PriceUpdated(_priceAtSupply(s + amount), s + amount);
+        emit PriceUpdated(_priceAtSupply(s + amount), s + amount, block.timestamp);
 
         // Refund any excess POL sent by the factory
         uint256 refund = msg.value - totalCost;
@@ -631,7 +634,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Emit events for tracking
         emit TokensSold(msg.sender, amount, proceeds, s - amount);
-        emit PriceUpdated(_priceAtSupply(s - amount), s - amount);
+        emit PriceUpdated(_priceAtSupply(s - amount), s - amount, block.timestamp);
         
         // Transfer net proceeds to the seller
         payable(msg.sender).sendValue(netProceeds);

@@ -87,27 +87,6 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
         address dexPair;
     }
     
-    /**
-     * @notice Statistics struct for factory-wide metrics
-     * @dev Used for analytics and monitoring factory performance
-     * @dev Currently defined but not fully utilized in all functions
-     */
-    struct FactoryStats {
-        /// @notice Total number of tokens ever deployed by this factory
-        uint256 totalTokens;
-        
-        /// @notice Total number of tokens that have graduated to DEX
-        uint256 totalGraduated;
-        
-        /// @notice Number of active tokens (not graduated yet)
-        uint256 totalActiveTokens;
-        
-        /// @notice Total creation fees collected by the factory
-        uint256 totalFeesCollected;
-        
-        /// @notice Total trading volume across all tokens (not currently tracked)
-        uint256 totalVolume;
-    }
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // FACTORY CONFIGURATION
@@ -549,12 +528,13 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
             hasGraduated: false,
             dexPair: address(0)  // Will be set when token graduates
         });
-        
+
         // Update factory's tracking systems
         tokens.push(tokenInfo);                              // Add to main array
-        tokenIndex[tokenAddress] = tokens.length - 1;       // Map address to index
+        uint256 newIndex = tokens.length - 1;               // Cache index (gas optimization)
+        tokenIndex[tokenAddress] = newIndex;                // Map address to index
         isTokenCreated[tokenAddress] = true;                 // Mark as factory-created
-        creatorTokens[msg.sender].push(tokens.length - 1);  // Add to creator's list
+        creatorTokens[msg.sender].push(newIndex);           // Add to creator's list
         
         // Update factory statistics
         totalFeesCollected += creationFee;
