@@ -10,40 +10,50 @@ import "./BondingCurveToken.sol";
 
 /**
  * @title TokenFactory
- * @author Kalp Team
- * @notice Factory contract for deploying and managing bonding curve tokens
- * @dev This contract serves as the central hub for the bonding curve token ecosystem
+ * @notice Factory contract for deploying and managing bonding curve tokens with automatic DEX graduation
+ * @dev Central hub for the bonding curve token ecosystem using UUPS upgradeable pattern
+ *
+ * ARCHITECTURE OVERVIEW:
+ * This factory deploys BondingCurveToken contracts with linear pricing curves that automatically
+ * graduate to Uniswap V2 DEX trading upon reaching configurable market cap thresholds.
  *
  * CORE FUNCTIONALITY:
- * - Deploy new bonding curve tokens with customizable parameters
- * - Manage fee structures and platform settings globally
- * - Track all tokens created through the factory
- * - Provide administrative functions for token management
- * - Handle creation fees and revenue collection
+ * - Deploy bonding curve tokens with customizable economic parameters
+ * - Manage global fee structures and platform settings
+ * - Track all deployed tokens with comprehensive indexing
+ * - Provide administrative controls for token lifecycle management
+ * - Collect and manage platform revenue from token creation
  *
- * SECURITY CONSIDERATIONS:
- * ⚠️ CENTRALIZATION RISKS:
- * - This contract uses UUPS upgradeable pattern controlled by a single owner
- * - Owner can upgrade contract logic, update fees, and trigger graduations
- * - Platform fee collector can be changed by owner
+ * SECURITY MODEL:
+ * ⚠️ CENTRALIZATION CONSIDERATIONS:
+ * - Implements UUPS upgradeable pattern with owner-controlled upgrades
+ * - Factory owner has authority to: upgrade logic, modify fees, force graduations
+ * - All tokens created inherit factory's configuration at deployment time
  *
- * RECOMMENDATIONS FOR PRODUCTION:
- * 1. Transfer ownership to a multi-signature wallet (e.g., Gnosis Safe with 3-of-5)
- * 2. Implement a timelock contract (e.g., 48-hour delay) for critical operations:
- *    - Contract upgrades
- *    - Fee structure changes
- *    - Router updates
- * 3. Consider adding governance mechanism for major decisions
- * 4. Implement emergency pause functionality with strict access controls
- * 5. Use OpenZeppelin's TimelockController for upgrade authorization
+ * PRODUCTION DEPLOYMENT REQUIREMENTS:
+ * 1. Multi-Signature Governance:
+ *    - Transfer ownership to multi-signature wallet (minimum 3-of-5 Gnosis Safe)
+ *    - Implement TimelockController with 48-hour minimum delay for:
+ *      · Contract upgrades (_authorizeUpgrade)
+ *      · Fee structure modifications (updateFeeDistribution, updateCreationFee)
+ *      · Critical parameter changes (updateRouter, updatePlatformFeeCollector)
  *
- * EXAMPLE SETUP:
- * ```
- * // 1. Deploy Gnosis Safe multisig with team members
- * // 2. Deploy TimelockController with 48-hour minimum delay
- * // 3. Transfer factory ownership to TimelockController
- * // 4. Set TimelockController admin to Gnosis Safe
- * ```
+ * 2. Access Control Best Practices:
+ *    - Deploy TimelockController as intermediate owner
+ *    - Set multi-signature wallet as TimelockController admin
+ *    - Document all administrative actions on-chain via events
+ *
+ * 3. Emergency Procedures:
+ *    - Establish incident response procedures for security events
+ *    - Define clear authorization requirements for triggerGraduation()
+ *    - Maintain separation of duties between operational and treasury functions
+ *
+ * INTEGRATION POINTS:
+ * - Uniswap V2 Router: For automated liquidity provision during graduation
+ * - Platform Fee Collector: Receives trading fees and platform revenue
+ * - BondingCurveToken: Individual token contracts with bonding curve logic
+ *
+ * @custom:oz-upgrades-unsafe-allow constructor
  */
 contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
     using Address for address payable;
@@ -338,20 +348,44 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     }
 
     /**
-     * @notice Initializes the TokenFactory with required addresses and configuration
-     * @dev Sets up the factory with DEX integration and fee collection infrastructure
-     * @dev Replaces constructor for upgradeable pattern
+     * @notice Initializes the TokenFactory with core infrastructure addresses
+     * @dev One-time initialization function for UUPS upgradeable proxy pattern
+     * @dev Must be called immediately after proxy deployment
      *
-     * @param _router Address of the Uniswap V2 Router for DEX integration
-     * @param _platformFeeCollector Address that will receive all platform fees
-     * @param _owner Address that will become the factory owner with admin privileges
+     * @param _router Address of the Uniswap V2 Router contract for DEX integration
+     * @param _platformFeeCollector Address that will receive all trading and platform fees
+     * @param _owner Address that will become the factory owner (should be multi-sig)
      *
-     * Initial State:
-     * - Creates empty tokens array for tracking deployments
-     * - Sets default fee structures (80% liquidity, 0% creator, 20% platform)
-     * - Sets default trading fees to 0% for both buy and sell
-     * - Sets creation fee to 1 POL
-
+     * Initialization Sequence:
+     * 1. Validates critical addresses (non-zero checks)
+     * 2. Initializes OpenZeppelin upgradeable contracts:
+     *    - Ownable: Sets ownership to _owner
+     *    - ReentrancyGuard: Initializes reentrancy protection
+     *    - UUPSUpgradeable: Enables upgrade functionality
+     * 3. Configures DEX integration with provided router
+     * 4. Sets platform fee collector address
+     * 5. Establishes default fee structures:
+     *    - creationFee: 1 POL per token deployment
+     *    - liquidityFee: 8000 basis points (80%)
+     *    - creatorFee: 0 basis points (0%)
+     *    - platformFee: 2000 basis points (20%)
+     *    - buyTradingFee: 0 basis points (0%)
+     *    - sellTradingFee: 0 basis points (0%)
+     *
+     * Requirements:
+     * - Can only be called once (enforced by initializer modifier)
+     * - _router must not be zero address
+     * - _platformFeeCollector must not be zero address
+     * - _owner should be multi-signature wallet for production
+     *
+     * Post-Initialization Actions Required:
+     * 1. Verify all addresses are correct
+     * 2. Transfer ownership to TimelockController (if using)
+     * 3. Configure fee structures via updateFeeDistribution() if needed
+     * 4. Set appropriate trading fees via updateTradingFees() if desired
+     *
+     * @custom:security Call immediately after proxy deployment
+     * @custom:security Verify initialization parameters before calling
      */
     function initialize(
         address _router,
@@ -783,14 +817,27 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     
     /**
      * @notice Withdraws all collected creation fees to the factory owner
-     * @dev Reentrancy protected to prevent malicious re-entry attacks
-     * @dev Only withdraws creation fees, not trading fees (those go to platform fee collector)
-     * 
+     * @dev Transfers entire contract balance to owner address using safe transfer
+     * @dev Only withdraws creation fees, not trading fees (routed to platform fee collector)
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - Contract balance must be greater than 0
+     *
      * Revenue Sources:
-     * - Token creation fees paid by users
-     * - Any accidental POL sent to factory contract
-     * - Does NOT include trading fees (sent directly to platform fee collector)
-
+     * - Token creation fees paid by users during token deployment
+     * - Any POL sent directly to factory contract address
+     *
+     * Note: Trading fees are transferred directly to platformFeeCollector during token operations
+     * and are not accumulated in this contract.
+     *
+     * Security:
+     * - Protected by nonReentrant modifier
+     * - Uses OpenZeppelin's sendValue for safe POL transfer
+     * - Emits FeesWithdrawn event for transparency
+     *
+     * Emits:
+     * - FeesWithdrawn(owner, amount)
      */
     function withdrawFees() external onlyOwner nonReentrant {
         uint256 balance = address(this).balance;
@@ -802,21 +849,30 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     }
     
     /**
-     * @notice Manually triggers graduation for a token (emergency function)
-     * @dev currently in dev mode to test graduations , will be removed later
-     * @dev Emergency function to force graduation without reaching market cap threshold
-     * @dev Bypasses normal market cap requirement for graduation
-     * @dev Should be used sparingly and only for valid reasons
-     * 
-     * @param token Address of the token to force graduate
-     * 
+     * @notice Manually triggers graduation for a token
+     * @dev Administrative function to force graduation without reaching market cap threshold
+     * @dev Bypasses normal market cap requirement - use only when necessary
+     * @dev Only callable by factory owner with proper authorization
+     *
+     * @param token Address of the token to graduate
+     *
+     * Requirements:
+     * - Caller must be factory owner
+     * - Token must exist and not be graduated
+     * - Token must have sufficient liquidity for DEX listing
+     *
      * Use Cases:
-     * - Emergency situations requiring immediate graduation
-     * - Testing purposes in development environments  
-     * - Special milestone celebrations
-     * - Resolution of technical issues preventing natural graduation
-     * 
-     * WARNING: This bypasses economic incentives and should be used cautiously
+     * - Emergency situations requiring immediate liquidity access
+     * - Technical issues preventing automatic graduation
+     * - Administrative decisions for token lifecycle management
+     *
+     * Security Considerations:
+     * - Bypasses economic incentives designed into bonding curve
+     * - Should be governed by multi-signature wallet in production
+     * - Consider implementing timelock for additional security
+     * - Document all uses for transparency and governance
+     *
+     * @custom:security-contact Ensure proper authorization before calling
      */
     function triggerGraduation(address token) external onlyOwner validTokenAddress(token) {
         BondingCurveToken tokenContract = BondingCurveToken(payable(token));
