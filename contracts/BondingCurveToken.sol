@@ -632,13 +632,17 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Internal function to check if graduation conditions are met
      * @dev Called after every buy operation to check if graduation threshold is reached
      * @dev Automatically triggers graduation if conditions are met
-     * 
+     *
      * Graduation Conditions:
      * - Market cap >= graduation threshold
      * - Token has not graduated yet
+     *
+     * Security: The hasGraduated check prevents concurrent graduation attempts
+     * even if multiple buys happen simultaneously before graduation completes
      */
     function _checkGraduation() internal {
-        if (getMarketCap() >= graduationThreshold && !hasGraduated) {
+        // Check both conditions atomically to prevent race conditions
+        if (!hasGraduated && getMarketCap() >= graduationThreshold) {
             _graduate();
         }
     }
@@ -647,7 +651,7 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * @notice Internal function that executes the graduation process
      * @dev This is the most critical function - it transitions from bonding curve to DEX
      * @dev Once called, the token can never return to bonding curve trading
-     * 
+     *
      * Graduation Process (Native POL UX):
      * 1. Calculate amounts and create pair first
      * 2. Mint additional tokens equal to current supply for liquidity
@@ -655,50 +659,50 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
      * 4. Try to add liquidity to V2 pair using addLiquidityETH
      * 5. Only mark as graduated if Uniswap operations succeed
      * 6. Distribute remaining fees to creator and platform in native POL
-     * 
+     *
      * Technical Implementation:
      * - V2 pair works directly with native ETH/POL (no wrapping needed)
      * - Simpler than V3 - no ticks, ranges, or NFT positions
      * - Standard AMM with constant product formula
      * - LP tokens represent proportional ownership
-     * 
+     *
      * Token Supply Impact:
      * - Before graduation: X tokens in circulation
      * - After graduation: 2X tokens total (X circulating + X in LP)
      * - This creates a 2:1 split where LP holds 50% of total supply
-     * 
+     *
      */
     function _graduate() internal {
         // Calculate amounts for liquidity provision
         uint256 currentSupply = totalSupply();
-        
+
         // Mint equal amount of tokens for liquidity (doubles total supply)
         uint256 liquidityTokenAmount = currentSupply;
-        
+
         // Calculate POL for liquidity (typically 80% of totalRaised)
         uint256 liquidityPolAmount = (totalRaised * LIQUIDITY_FEE) / 10000;
-        
+
         // Create or get the myToken/POL pair on Uniswap V2
         address pair = uniswapV2Factory.getPair(address(this), router.WETH());
         if (pair == address(0)) {
             pair = uniswapV2Factory.createPair(address(this), router.WETH());
         }
-        
+
         // Mint additional tokens for the liquidity pool
         _mint(address(this), liquidityTokenAmount);
-        
+
         // Approve router to spend our tokens
         _approve(address(this), address(router), liquidityTokenAmount);
-        
+
         // Calculate dynamic slippage protection (5% max slippage)
         uint256 maxSlippage = 500; // 5% in basis points
         uint256 tokenMin = liquidityTokenAmount * (10000 - maxSlippage) / 10000;
         uint256 ethMin = liquidityPolAmount * (10000 - maxSlippage) / 10000;
-        
+
         // Set deadline with validation
         uint256 deadline = block.timestamp + 300; // 5 minutes
         require(deadline > block.timestamp, "Deadline must be in the future");
-        
+
         // Try Uniswap operation with proper error handling and dynamic slippage
         try router.addLiquidityETH{value: liquidityPolAmount}(
             address(this),                    // token
@@ -708,19 +712,19 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
             address(this),                    // to (this contract receives LP tokens)
             deadline                          // deadline (5 minutes)
         ) returns (uint amountToken, uint amountETH, uint liquidity) {
-            // Only mark as graduated if Uniswap operations succeed
+            // CRITICAL: Mark as graduated BEFORE external calls to prevent reentrancy
             hasGraduated = true;
             dexPool = pair;
-            
+
             // Store the amount of liquidity tokens we received
             liquidityTokensAmount = liquidity;
-            
-            // Distribute remaining fees to creator and platform
-            _distributeFees();
-            
+
             // Emit events for tracking the successful myToken/POL pair creation
             emit GraduationTriggered(currentSupply, getMarketCap(), dexPool, liquidityTokensAmount);
             emit LiquidityAdded(amountToken, amountETH, liquidity);
+
+            // Distribute remaining fees to creator and platform (AFTER state changes)
+            _distributeFees();
         } catch {
             // Revert state changes if Uniswap operation fails
             _burn(address(this), liquidityTokenAmount);

@@ -417,7 +417,7 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
     ) external payable nonReentrant validParameters(name, symbol, slope, basePrice, graduationThreshold) returns (address tokenAddress) {
 
         // Calculate the cost for buying tokens (using the same formula as BondingCurveToken)
-        uint256 tokenBuyCost = _calculateBuyCost(0, tokenAmount, slope, basePrice);
+        uint256 tokenBuyCost = calculateBuyCost(0, tokenAmount, slope, basePrice);
         uint256 tradingFee = (tokenBuyCost * buyTradingFee) / 10000; 
         uint256 totalRequired = creationFee + tokenBuyCost + tradingFee;
 
@@ -448,17 +448,17 @@ contract TokenFactory is Initializable, OwnableUpgradeable, ReentrancyGuardUpgra
      * @param basePrice Initial token price
      * @return cost Total cost in wei to buy d tokens
      */
-    function _calculateBuyCost(uint256 s, uint256 d, uint256 slope, uint256 basePrice) public pure returns (uint256 cost) {
+    function calculateBuyCost(uint256 s, uint256 d, uint256 slope, uint256 basePrice) public pure returns (uint256 cost) {
         // Using the same constants as BondingCurveToken
         uint256 WAD = 10**18;
 
         uint256 term1 = Math.mulDiv(basePrice, d, WAD, Math.Rounding.Ceil);
-        
+
         // term2 = slope * d * (2*s + d) / (2 * WAD^2)
         uint256 sdOverWad = Math.mulDiv(slope, d, WAD, Math.Rounding.Ceil); // slope * d / WAD
         uint256 twoSPlusD = s * 2 + d; // safe with checked math (reverts on overflow)
         uint256 term2 = Math.mulDiv(sdOverWad, twoSPlusD, 2 * WAD, Math.Rounding.Ceil);
-        
+
         return term1 + term2;
     }
 
