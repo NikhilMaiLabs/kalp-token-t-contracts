@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../contracts/TokenFactory.sol";
 import "../contracts/BondingCurveToken.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // Mock contracts for testing
 contract MockUniswapV2Router {
@@ -96,11 +97,21 @@ contract TokenCreationTest is Test {
         mockWETH = new MockWETH();
         mockUniswapFactory = new MockUniswapV2Factory();
         mockRouter = new MockUniswapV2Router(address(mockUniswapFactory), address(mockWETH));
-        
-        // Deploy factory with owner
-        vm.prank(owner);
-        factory = new TokenFactory(address(mockRouter), platformFeeCollector, owner);
-        
+
+        // Deploy factory implementation
+        TokenFactory implementation = new TokenFactory();
+
+        // Deploy proxy and initialize
+        bytes memory initData = abi.encodeWithSelector(
+            TokenFactory.initialize.selector,
+            address(mockRouter),
+            platformFeeCollector,
+            owner
+        );
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        factory = TokenFactory(payable(address(proxy)));
+
         // Setup test accounts with ETH
         vm.deal(owner, 100 ether);
         vm.deal(tokenCreator, 100 ether);
@@ -378,9 +389,9 @@ contract TokenCreationTest is Test {
      * @dev Verifies system handles large numbers appropriately
      */
     function test_CreateToken_ExtremelyLargeParameters() public {
-        uint256 largeSlope = type(uint256).max / 1000; // Avoid overflow in calculations
-        uint256 largeBasePrice = type(uint256).max / 1000;
-        uint256 largeThreshold = type(uint256).max / 1000;
+        uint256 largeSlope = 1e27; // MAX_BASE_PRICE (lowest of the three maxes)
+        uint256 largeBasePrice = 1e27; // MAX_BASE_PRICE
+        uint256 largeThreshold = 1e27; // Use same value to avoid overflow in calculations
         
         vm.prank(tokenCreator);
         address tokenAddress = factory.createToken{value: DEFAULT_CREATION_FEE}(
@@ -391,7 +402,7 @@ contract TokenCreationTest is Test {
             largeThreshold
         );
         
-        assertTrue(tokenAddress != address(0), "Token should be created with large parameters");
+        assertTrue(tokenAddress != address(0), "Token should be created with max allowed parameters");
         
         TokenFactory.TokenInfo memory tokenInfo = factory.getTokenInfo(tokenAddress);
         assertEq(tokenInfo.slope, largeSlope, "Large slope should be stored correctly");

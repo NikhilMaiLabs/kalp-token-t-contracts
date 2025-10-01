@@ -7,6 +7,7 @@ import "../contracts/BondingCurveToken.sol";
 import "../contracts/mocks/MockUniswapV2Router.sol";
 import "../contracts/mocks/MockUniswapV2Factory.sol";
 import "../contracts/mocks/MockWETH.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
  * @title GraduationTest
@@ -51,13 +52,23 @@ contract GraduationTest is Test {
         mockWETH = new MockWETH();
         mockUniswapFactory = new MockUniswapV2Factory();
         mockRouter = new MockUniswapV2Router(
-            address(mockUniswapFactory), 
+            address(mockUniswapFactory),
             address(mockWETH)
         );
-        
-        // Deploy factory
-        vm.prank(owner);
-        factory = new TokenFactory(address(mockRouter), platformFeeCollector, owner);
+
+        // Deploy factory implementation
+        TokenFactory implementation = new TokenFactory();
+
+        // Deploy proxy and initialize
+        bytes memory initData = abi.encodeWithSelector(
+            TokenFactory.initialize.selector,
+            address(mockRouter),
+            platformFeeCollector,
+            owner
+        );
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        factory = TokenFactory(payable(address(proxy)));
         
         // Create test token
         vm.prank(tokenCreator);
@@ -169,16 +180,15 @@ contract GraduationTest is Test {
         vm.prank(address(factory));
         token.triggerGraduation();
         
-        // Calculate expected fees from remaining POL after liquidity
-        // Liquidity gets 80% of totalRaised, remaining 20% is distributed as fees
+        // Calculate expected graduation fees
+        // Graduation fees are calculated from totalRaised (not remaining POL)
         uint256 totalRaised = token.totalRaised();
-        uint256 remainingPol = totalRaised - (totalRaised * token.LIQUIDITY_FEE()) / 10000;
-        uint256 expectedPlatformFee = (remainingPol * token.PLATFORM_FEE()) / 10000;
-        uint256 expectedCreatorFee = (remainingPol * token.CREATOR_FEE()) / 10000;
-        
-        // Verify fee distribution
-        assertEq(platformFeeCollector.balance, initialPlatformBalance + expectedPlatformFee, "Platform should receive fee");
-        assertEq(tokenCreator.balance, initialCreatorBalance + expectedCreatorFee, "Creator should receive fee");
+        uint256 expectedPlatformFee = (totalRaised * token.PLATFORM_FEE()) / 10000;
+        uint256 expectedCreatorFee = (totalRaised * token.CREATOR_FEE()) / 10000;
+
+        // Verify graduation fee distribution (fees are transferred during graduation)
+        assertEq(platformFeeCollector.balance, initialPlatformBalance + expectedPlatformFee, "Platform should receive graduation fee");
+        assertEq(tokenCreator.balance, initialCreatorBalance + expectedCreatorFee, "Creator should receive graduation fee");
     }
     
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -223,14 +233,14 @@ contract GraduationTest is Test {
         
         // Try to manually graduate again
         vm.prank(address(factory));
-        vm.expectRevert("Token has already graduated");
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
         token.triggerGraduation();
     }
     
     function test_manualGraduationOnlyFactory() public {
         // Try to trigger graduation as non-factory
         vm.prank(buyer1);
-        vm.expectRevert("Only factory can call this function");
+        vm.expectRevert(BondingCurveToken.OnlyFactory.selector);
         token.triggerGraduation();
     }
     
@@ -241,10 +251,19 @@ contract GraduationTest is Test {
     function test_graduationRollbackOnUniswapFailure() public {
         // Create a failing router
         MockFailingRouter failingRouter = new MockFailingRouter();
-        
-        // Deploy new factory with failing router
-        vm.prank(owner);
-        TokenFactory failingFactory = new TokenFactory(address(failingRouter), platformFeeCollector, owner);
+
+        // Deploy new factory with failing router via proxy
+        TokenFactory failingImplementation = new TokenFactory();
+
+        bytes memory failingInitData = abi.encodeWithSelector(
+            TokenFactory.initialize.selector,
+            address(failingRouter),
+            platformFeeCollector,
+            owner
+        );
+
+        ERC1967Proxy failingProxy = new ERC1967Proxy(address(failingImplementation), failingInitData);
+        TokenFactory failingFactory = TokenFactory(payable(address(failingProxy)));
         
         // Create token with failing factory
         vm.prank(tokenCreator);
@@ -268,7 +287,7 @@ contract GraduationTest is Test {
         
         // Try to manually trigger graduation (should fail due to failing router)
         vm.prank(address(failingFactory));
-        vm.expectRevert("Graduation failed: Uniswap operation unsuccessful");
+        vm.expectRevert(abi.encodeWithSelector(BondingCurveToken.GraduationFailed.selector, "Mock router failure"));
         failingToken.triggerGraduation();
         
         // Verify token is not graduated
@@ -299,12 +318,12 @@ contract GraduationTest is Test {
         
         // Try to buy more tokens after graduation
         vm.prank(buyer2);
-        vm.expectRevert("Token has already graduated");
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
         token.buyTokens{value: 1 ether}(1);
         
         // Try to sell tokens after graduation
         vm.prank(buyer1);
-        vm.expectRevert("Token has already graduated");
+        vm.expectRevert(BondingCurveToken.TokenAlreadyGraduated.selector);
         token.sellTokens(1, 0);
     }
     
@@ -341,13 +360,10 @@ contract GraduationTest is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
     
     function test_graduationWithZeroSupply() public {
-        // Try to manually graduate with zero supply
+        // Try to manually graduate with zero supply - should revert
         vm.prank(address(factory));
+        vm.expectRevert(abi.encodeWithSelector(BondingCurveToken.InvalidParameter.selector, "zero supply"));
         token.triggerGraduation();
-        
-        // Should still work (edge case)
-        assertTrue(token.hasGraduated(), "Should be graduated even with zero supply");
-        assertTrue(token.dexPool() != address(0), "Should have DEX pool");
     }
     
     function test_graduationWithMinimalSupply() public {

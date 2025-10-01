@@ -20,3 +20,11 @@
 /coverage
 
 /out
+
+# Foundry/lib directory (not used in this Hardhat project)
+/lib
+
+# Environment variables
+.env
+.env.local
+.env.*.local
