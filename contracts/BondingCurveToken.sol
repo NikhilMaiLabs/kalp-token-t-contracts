@@ -186,16 +186,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @dev Range: 0-10000 (0%-100%)
     uint256 public creatorTradingFeeShare;
 
-    /// @notice Accumulated trading fees claimable by creator (in wei)
-    /// @dev Incremented during buy/sell operations based on creatorTradingFeeShare
-    /// @dev Can be claimed by creator via claimCreatorTradingFees()
-    uint256 public accumulatedCreatorFees;
-
-    /// @notice Accumulated trading fees claimable by platform (in wei)
-    /// @dev Incremented during buy/sell operations based on remaining share
-    /// @dev Automatically transferred to platformFeeCollector when claimed
-    uint256 public accumulatedPlatformFees;
-
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -243,20 +233,20 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
     /// @param amount Amount of POL withdrawn
     event DustWithdrawn(address indexed owner, uint256 amount);
 
-    /// @notice Emitted when creator claims accumulated trading fees
-    /// @param creator Address of the creator claiming fees
-    /// @param amount Amount of trading fees claimed in wei
-    event CreatorTradingFeesClaimed(address indexed creator, uint256 amount);
-
-    /// @notice Emitted when platform claims accumulated trading fees
-    /// @param platformFeeCollector Address of the platform fee collector
-    /// @param amount Amount of trading fees claimed in wei
-    event PlatformTradingFeesClaimed(address indexed platformFeeCollector, uint256 amount);
-
     /// @notice Emitted when trading fee split is updated
     /// @param creatorShare New creator share in basis points
     /// @param platformShare New platform share in basis points
     event TradingFeeSplitUpdated(uint256 creatorShare, uint256 platformShare);
+
+    /// @notice Emitted when creator trading fee is transferred directly
+    /// @param creator Address of the creator receiving fees
+    /// @param amount Amount of trading fees transferred in wei
+    event CreatorTradingFeeTransferred(address indexed creator, uint256 amount);
+
+    /// @notice Emitted when platform trading fee is transferred directly
+    /// @param platformFeeCollector Address of the platform fee collector receiving fees
+    /// @param amount Amount of trading fees transferred in wei
+    event PlatformTradingFeeTransferred(address indexed platformFeeCollector, uint256 amount);
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERRORS
@@ -599,20 +589,29 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Mint tokens to the buyer
         _mint(msg.sender, amount);
-        
+
         // Update totalRaised with only the bonding curve cost
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
 
-        // Split and accumulate trading fees between creator and platform
+        // Split and transfer trading fees directly to creator and platform
         if (tradingFee > 0) {
             uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
             uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
 
-            accumulatedCreatorFees += creatorFeeAmount;
-            accumulatedPlatformFees += platformFeeAmount;
+            // Transfer creator fee directly if any
+            if (creatorFeeAmount > 0) {
+                payable(creator).sendValue(creatorFeeAmount);
+                emit CreatorTradingFeeTransferred(creator, creatorFeeAmount);
+            }
+
+            // Transfer platform fee directly if any
+            if (platformFeeAmount > 0) {
+                payable(platformFeeCollector).sendValue(platformFeeAmount);
+                emit PlatformTradingFeeTransferred(platformFeeCollector, platformFeeAmount);
+            }
         }
-        
+
         // Emit events for tracking
         emit TokensPurchased(msg.sender, amount, cost, s + amount);
         emit PriceUpdated(_priceAtSupply(s + amount), s + amount, block.timestamp);
@@ -669,13 +668,22 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         // (Trading fees don't count towards graduation calculations)
         totalRaised += cost;
 
-        // Split and accumulate trading fees between creator and platform
+        // Split and transfer trading fees directly to creator and platform
         if (tradingFee > 0) {
             uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
             uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
 
-            accumulatedCreatorFees += creatorFeeAmount;
-            accumulatedPlatformFees += platformFeeAmount;
+            // Transfer creator fee directly if any
+            if (creatorFeeAmount > 0) {
+                payable(creator).sendValue(creatorFeeAmount);
+                emit CreatorTradingFeeTransferred(creator, creatorFeeAmount);
+            }
+
+            // Transfer platform fee directly if any
+            if (platformFeeAmount > 0) {
+                payable(platformFeeCollector).sendValue(platformFeeAmount);
+                emit PlatformTradingFeeTransferred(platformFeeCollector, platformFeeAmount);
+            }
         }
 
         // Emit events for tracking (show recipient as the buyer)
@@ -730,20 +738,29 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         
         // Burn tokens from the seller (reduces total supply)
         _burn(msg.sender, amount);
-        
+
         // Update totalRaised by the full proceeds amount
         // (This maintains bonding curve integrity)
         totalRaised -= proceeds;
 
-        // Split and accumulate trading fees between creator and platform
+        // Split and transfer trading fees directly to creator and platform
         if (tradingFee > 0) {
             uint256 creatorFeeAmount = (tradingFee * creatorTradingFeeShare) / 10000;
             uint256 platformFeeAmount = tradingFee - creatorFeeAmount;
 
-            accumulatedCreatorFees += creatorFeeAmount;
-            accumulatedPlatformFees += platformFeeAmount;
+            // Transfer creator fee directly if any
+            if (creatorFeeAmount > 0) {
+                payable(creator).sendValue(creatorFeeAmount);
+                emit CreatorTradingFeeTransferred(creator, creatorFeeAmount);
+            }
+
+            // Transfer platform fee directly if any
+            if (platformFeeAmount > 0) {
+                payable(platformFeeCollector).sendValue(platformFeeAmount);
+                emit PlatformTradingFeeTransferred(platformFeeCollector, platformFeeAmount);
+            }
         }
-        
+
         // Emit events for tracking
         emit TokensSold(msg.sender, amount, proceeds, s - amount);
         emit PriceUpdated(_priceAtSupply(s - amount), s - amount, block.timestamp);
@@ -1142,84 +1159,6 @@ contract BondingCurveToken is ERC20, Ownable, ReentrancyGuard, Pausable, BlackLi
         payable(owner()).sendValue(balance);
 
         emit DustWithdrawn(owner(), balance);
-    }
-
-    /**
-     * @notice Allows creator to claim accumulated trading fees
-     * @dev Transfers all accumulated creator trading fees to the creator address
-     * @dev Can be called at any time (before or after graduation)
-     *
-     * Requirements:
-     * - Only callable by token creator (owner)
-     * - Must have accumulated fees > 0
-     *
-     * Fee Source:
-     * - Trading fees from buyTokens() operations split by creatorTradingFeeShare
-     * - Trading fees from sellTokens() operations split by creatorTradingFeeShare
-     * - Accumulated since last claim or token deployment
-     *
-     * Security:
-     * - Protected by onlyOwner modifier
-     * - Protected by nonReentrant modifier
-     * - Uses safe transfer via sendValue()
-     * - Resets accumulated fees to 0 before transfer (CEI pattern)
-     *
-     * Gas Optimization:
-     * - Recommend claiming periodically to avoid large accumulations
-     * - Consider batching with other owner operations
-     *
-     * Emits:
-     * - CreatorTradingFeesClaimed(creator, amount)
-     */
-    function claimCreatorTradingFees() external onlyOwner nonReentrant {
-        uint256 amount = accumulatedCreatorFees;
-        if (amount == 0) revert ZeroAmount();
-
-        // Reset accumulated fees before transfer (CEI pattern)
-        accumulatedCreatorFees = 0;
-
-        // Transfer fees to creator
-        payable(creator).sendValue(amount);
-
-        emit CreatorTradingFeesClaimed(creator, amount);
-    }
-
-    /**
-     * @notice Allows platform to claim accumulated trading fees
-     * @dev Transfers all accumulated platform trading fees to platformFeeCollector
-     * @dev Can be called by anyone but fees always go to platformFeeCollector
-     *
-     * Requirements:
-     * - Must have accumulated platform fees > 0
-     *
-     * Fee Source:
-     * - Trading fees from buyTokens() operations (platform share)
-     * - Trading fees from sellTokens() operations (platform share)
-     * - Accumulated since last claim or token deployment
-     *
-     * Security:
-     * - Protected by nonReentrant modifier
-     * - Uses safe transfer via sendValue()
-     * - Resets accumulated fees to 0 before transfer (CEI pattern)
-     * - Fees always sent to platformFeeCollector (cannot be redirected)
-     *
-     * Note: This function is callable by anyone to allow automated fee collection
-     * systems to operate without requiring private key access to factory owner.
-     *
-     * Emits:
-     * - PlatformTradingFeesClaimed(platformFeeCollector, amount)
-     */
-    function claimPlatformTradingFees() external nonReentrant {
-        uint256 amount = accumulatedPlatformFees;
-        if (amount == 0) revert ZeroAmount();
-
-        // Reset accumulated fees before transfer (CEI pattern)
-        accumulatedPlatformFees = 0;
-
-        // Transfer fees to platform fee collector
-        payable(platformFeeCollector).sendValue(amount);
-
-        emit PlatformTradingFeesClaimed(platformFeeCollector, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
