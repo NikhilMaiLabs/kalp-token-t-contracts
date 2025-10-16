@@ -173,22 +173,25 @@ contract TokenTradingTest is Test {
         uint256 expectedCreatorFee = (tradingFee * token.creatorTradingFeeShare()) / 10000;
         uint256 expectedPlatformFee = tradingFee - expectedCreatorFee;
 
+        // Record initial balances
+        uint256 initialCreatorBalance = tokenCreator.balance;
+        uint256 initialPlatformBalance = platformFeeCollector.balance;
+
         vm.prank(buyer);
         token.buyTokens{value: totalCost}(tokensToBuy);
 
         assertEq(token.balanceOf(buyer), tokensToBuy, "Buyer should receive tokens");
 
-        // Verify fees are accumulated, not transferred
-        assertEq(token.accumulatedCreatorFees(), expectedCreatorFee, "Creator fees should be accumulated");
-        assertEq(token.accumulatedPlatformFees(), expectedPlatformFee, "Platform fees should be accumulated");
-
-        // Claim platform fees and verify transfer
-        uint256 initialPlatformBalance = platformFeeCollector.balance;
-        token.claimPlatformTradingFees();
+        // Verify fees are transferred directly (not accumulated)
+        assertEq(
+            tokenCreator.balance,
+            initialCreatorBalance + expectedCreatorFee,
+            "Creator should receive fee directly"
+        );
         assertEq(
             platformFeeCollector.balance,
             initialPlatformBalance + expectedPlatformFee,
-            "Platform should receive fee after claim"
+            "Platform should receive fee directly"
         );
     }
     
@@ -223,43 +226,46 @@ contract TokenTradingTest is Test {
         // Set 3% sell fee
         vm.prank(address(factory));
         token.updateTradingFees(0, 300);
-        
+
         // Buy tokens first
         uint256 tokensToBuy = 8;
         uint256 buyCost = token.getBuyPrice(tokensToBuy);
         uint256 buyTradingFee = (buyCost * token.buyTradingFee()) / 10000;
         uint256 totalBuyCost = buyCost + buyTradingFee;
-        
+
         vm.prank(buyer);
         token.buyTokens{value: totalBuyCost}(tokensToBuy);
-        
+
         // Sell tokens
         uint256 tokensToSell = 4;
         uint256 refund = token.getSellPrice(tokensToSell);
         uint256 fee = (refund * 300) / 10000;
         uint256 netRefund = refund - fee;
-        uint256 initialBalance = buyer.balance;
+        uint256 initialBuyerBalance = buyer.balance;
 
         // Calculate expected fee split
         uint256 expectedCreatorFee = (fee * token.creatorTradingFeeShare()) / 10000;
         uint256 expectedPlatformFee = fee - expectedCreatorFee;
 
+        // Record initial balances for fee recipients
+        uint256 initialCreatorBalance = tokenCreator.balance;
+        uint256 initialPlatformBalance = platformFeeCollector.balance;
+
         vm.prank(buyer);
         token.sellTokens(tokensToSell, 0);
 
-        assertEq(buyer.balance, initialBalance + netRefund, "Should receive net refund");
+        assertEq(buyer.balance, initialBuyerBalance + netRefund, "Should receive net refund");
 
-        // Verify fees are accumulated
-        assertEq(token.accumulatedCreatorFees(), expectedCreatorFee, "Creator fees should be accumulated");
-        assertEq(token.accumulatedPlatformFees(), expectedPlatformFee, "Platform fees should be accumulated");
-
-        // Claim and verify platform fees
-        uint256 initialPlatformBalance = platformFeeCollector.balance;
-        token.claimPlatformTradingFees();
+        // Verify fees are transferred directly (not accumulated)
+        assertEq(
+            tokenCreator.balance,
+            initialCreatorBalance + expectedCreatorFee,
+            "Creator should receive fee directly"
+        );
         assertEq(
             platformFeeCollector.balance,
             initialPlatformBalance + expectedPlatformFee,
-            "Platform should receive sell fee after claim"
+            "Platform should receive sell fee directly"
         );
     }
     
