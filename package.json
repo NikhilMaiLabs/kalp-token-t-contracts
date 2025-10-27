@@ -17,10 +17,9 @@
     "verify:polygon": "hardhat verify --network polygon",
     "verify:amoy": "hardhat verify --network amoy",
     "verify:sepolia": "hardhat verify --network sepolia",
-    "interact:amoy": "hardhat run scripts/interact-contracts-viem.ts --network amoy",
     "deploy-and-interact:amoy": "hardhat run scripts/deploy-and-interact-viem.ts --network amoy",
     "deploy-and-interact:local": "hardhat run scripts/deploy-and-interact-local.ts --network localhost",
-    "quick-test:local": "hardhat run scripts/quick-test-local.ts --network localhost"
+    "test-upgrade:local": "hardhat run scripts/test-upgrade.ts --network localhost"
   },
   "keywords": [],
   "author": "",
@@ -38,6 +37,7 @@
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.4.0",
+    "@openzeppelin/contracts-upgradeable": "^5.4.0",
     "dotenv": "^17.2.2"
   }
 }
